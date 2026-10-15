@@ -12,7 +12,7 @@ mod workspace;
 pub use error::{Conflict, InvalidFile, ParseError, StoreError, UpdateError};
 pub use format::TicketDoc;
 pub use lease::{AcquireError, Claimed, Lease, Leases};
-pub use log::append_log;
+pub use log::{LogEntry, LogLine, append_entries, log_lines, without_log};
 pub use merge::{Merged, merge};
 pub use store::{Edited, Loaded, Saved, Snapshot, Store, Tx, find_repo};
 pub use version::{Version, VersionHex, VersionHexError};

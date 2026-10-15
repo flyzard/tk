@@ -60,6 +60,13 @@ pub enum Cmd {
         #[arg(value_parser = parsed::<TicketId>)]
         id: TicketId,
     },
+    /// What a fresh session needs to pick a ticket up: its handoff, what was
+    /// ruled out and decided, and the latest notes
+    Brief {
+        /// [default: the tickets you have in doing in this checkout]
+        #[arg(value_parser = parsed::<TicketId>)]
+        id: Option<TicketId>,
+    },
     /// Validate every ticket file and the dependency graph
     Lint {
         #[arg(long, short)]
@@ -113,6 +120,9 @@ pub enum WriteCmd {
         /// Also start it
         #[arg(long)]
         claim: bool,
+        /// Print its brief instead of one line
+        #[arg(long)]
+        brief: bool,
         #[arg(long, value_parser = project_key)]
         project: Option<ProjectKey>,
     },
@@ -148,10 +158,40 @@ pub enum WriteCmd {
         id: TicketId,
         /// One line of text; `-` reads it from stdin
         text: String,
+        /// Something tried that didn't work, so the next session skips it
+        #[arg(long, conflicts_with = "decided")]
+        ruled_out: bool,
+        /// A choice made, so the next session doesn't reopen it
+        #[arg(long)]
+        decided: bool,
     },
+    /// End a session: log what's next, what was ruled out and decided, in one write.
+    /// The ticket stays yours unless you --release or --block it
+    Handoff(HandoffArgs),
     /// Add or remove a dependency
     #[command(subcommand)]
     Dep(DepCmd),
+}
+
+#[derive(Args, Debug)]
+pub struct HandoffArgs {
+    #[command(flatten)]
+    pub target: Target,
+    /// What the next session should do; repeat for several steps
+    #[arg(long = "next", required = true, value_parser = non_empty)]
+    pub next: Vec<NonEmpty>,
+    /// Something tried that didn't work; repeatable
+    #[arg(long = "ruled-out", value_parser = non_empty)]
+    pub ruled_out: Vec<NonEmpty>,
+    /// A choice made; repeatable
+    #[arg(long = "decided", value_parser = non_empty)]
+    pub decided: Vec<NonEmpty>,
+    /// Put it back to todo for anyone
+    #[arg(long, conflicts_with = "block")]
+    pub release: bool,
+    /// Block it, with this reason
+    #[arg(long, value_parser = non_empty)]
+    pub block: Option<NonEmpty>,
 }
 
 #[derive(Args, Debug)]

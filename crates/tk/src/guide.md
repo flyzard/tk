@@ -6,17 +6,27 @@ Add `--json` to any command for machine-readable output, and `--as agent:<name>`
 
 ## Working loop
 
-    tk next --claim --json        # take the top ready ticket and start it
-    tk show <id> --json           # read it; note its "version"
+One ticket per session. Start from its brief, not from memory; end with a handoff.
+
+    tk next --claim --brief       # take the top ready ticket, start it, print its brief
+    tk brief                      # later: the brief of your doing ticket in this checkout
     tk log <id> "what you found"  # append to its ## Log as you work
-    tk done <id>                  # or: tk block <id> --reason "..."; tk release <id>
+    tk log <id> --ruled-out "..." # something that didn't work, so nobody tries it again
+    tk log <id> --decided "..."   # a choice made, so nobody reopens it
+    tk done <id>                  # finished; or hand off before your context fills up:
+    tk handoff <id> --next "..." [--next ...] [--ruled-out ...] [--decided ...] [--release | --block "..."]
+
+A brief is the ticket's text, the latest handoff's next steps (with how long ago, and how
+many entries were logged since), everything ruled out and decided, and the latest notes.
+A handoff keeps the ticket yours unless you release or block it; the next handoff replaces
+its next steps. Hand off when you stop for any reason and the ticket isn't done.
 
 ## Rules
 
 - Status: todo -> doing (start) -> done (done). block/unblock pause it, release puts it back
   to todo, reopen brings a done ticket back to todo. Anything else is refused.
 - A ticket can only start when every ticket it depends on is done (`tk next` only offers those).
-- Pass `--if-version <version>` from `tk show` to any write; if someone else changed the
+- Pass `--if-version <version>` from `tk show` or `tk brief --json` to any write; if someone else changed the
   ticket since, tk refuses with code "conflict" instead of overwriting their edit.
 - Errors go to stderr as {"code","message","hint"}, with a distinct exit status per code.
 
@@ -31,8 +41,23 @@ Add `--json` to any command for machine-readable output, and `--as agent:<name>`
 ## MCP
 
 `tk mcp` serves the same commands over MCP on stdio: tools `run` (any command `tk schema`
-describes), `next`, `list`, `show`, `lint` and `guide`. Register it as a stdio server with
+describes), `next`, `list`, `show`, `brief`, `handoff`, `lint` and `guide`. Register it as a stdio server with
 `TK_ACTOR=agent:<name>` in its environment, started from inside the project.
+
+## Starting every session from the brief (Claude Code)
+
+A SessionStart hook prints the brief into a new session's context, and again after
+compaction, so the summary can't drop the plan. In `.claude/settings.json`:
+
+    {
+      "env": { "TK_ACTOR": "agent:claude" },
+      "hooks": {
+        "SessionStart": [{ "matcher": "startup|compact",
+          "hooks": [{ "type": "command", "command": "tk brief" }] }]
+      }
+    }
+
+A hook can't write the handoff for you: compaction gives you no turn. Hand off yourself.
 
 ## More
 

@@ -9,7 +9,7 @@ use tk_core::Timestamp;
 use toml_edit::{Array, DocumentMut, Item, Value};
 
 use crate::format;
-use crate::log::{log_entries, with_log_entries, without_log};
+use crate::log::{line_stamp, log_entries, with_log_entries, without_log};
 
 /// The merged file. `Conflicted` text carries git-style markers around each
 /// field both sides changed differently; each side alone is valid TOML.
@@ -147,14 +147,9 @@ fn parse(text: &str) -> Option<(DocumentMut, String)> {
     Some((toml.parse().ok()?, body.to_owned()))
 }
 
-/// The timestamp of a `- <timestamp> <actor>: <text>` entry.
+/// The timestamp a log line starts with, if it has one.
 fn stamp(entry: &str) -> Option<Timestamp> {
-    entry
-        .strip_prefix("- ")?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
+    line_stamp(entry).map(|(at, _)| at)
 }
 
 fn value<'a>(doc: &'a DocumentMut, key: &str) -> Option<&'a Value> {
@@ -278,7 +273,7 @@ Missing after the 1st.
     #[test]
     fn first_log_and_a_prose_edit_merge_cleanly() {
         let base = BASE.replace("\n## Log\n- 2026-10-14T09:05:00Z human:muxa: filed\n", "");
-        let ours = crate::append_log(&base, "- 2026-10-14T10:00:00Z agent:a: first note");
+        let ours = crate::log::append_log(&base, "- 2026-10-14T10:00:00Z agent:a: first note");
         let theirs = base.replace(
             "Missing after the 1st.",
             "Missing after the 1st of each month.",

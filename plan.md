@@ -453,10 +453,12 @@ The newtypes deserialize through nutype's rules, so a bad `tk apply` line is rej
 | `tk new "Title" [--kind] [--priority] [--label] [--dep]` | Creates a ticket; the body comes from stdin when piped |
 | `tk ls [--all] [--status] [--label] [--fields]` | Lists tickets, hiding done ones by default |
 | `tk show <id>` | One ticket with its version and its dependencies' status |
-| `tk next [--claim]` | The top ready ticket; `--claim` also starts it |
+| `tk next [--claim] [--brief]` | The top ready ticket; `--claim` also starts it, `--brief` prints its brief |
 | `tk start`, `block`, `unblock`, `release`, `done`, `reopen` | Status transitions on one ticket |
 | `tk edit <id> [--title] [--priority] [--add-label]` | Field changes |
-| `tk log <id> [text or -]` | Appends to `## Log`; `-` reads stdin |
+| `tk log <id> [text or -] [--ruled-out \| --decided]` | Appends to `## Log`; `-` reads stdin |
+| `tk handoff <id> --next ... [--ruled-out] [--decided] [--release \| --block]` | Ends a session: typed log entries and an optional move, in one transaction |
+| `tk brief [<id>]` | The compact starting context for a ticket; no ID means your `doing` ticket here |
 | `tk dep add` / `tk dep rm` | Dependency changes, cycle-checked |
 | `tk lint [--all]` | Validates every file; use it as a pre-commit hook |
 | `tk apply` | Runs JSON lines of `Command` from stdin |
@@ -584,9 +586,65 @@ Leases stop two agents from starting the same ticket, even in different worktree
 
 In a single checkout, the store lock and the state machine already stop double starts: the second agent's `Start` hits a ticket that is already `Doing`. Leases matter once agents work in parallel worktrees, which is why they come in phase 5.
 
+## Handoffs between sessions
+
+An agent's context fills up with old file reads and dead ends, and quality drops. The fix is one ticket per session: each session ends with a typed handoff, and the next one starts from a derived brief instead of the chat history.
+
+**A handoff is typed log entries, and the brief is derived from them.** There is no `## Handoff` section to rewrite: the body stays the author's, tk still only appends, and nothing derived is stored.
+
+```markdown
+## Log
+- 2026-10-15T09:20:45Z agent:claude: pure merge: fields 3-way, labels as sets
+- 2026-10-15T09:48:00Z agent:claude ruled-out: 2-way log merge, loses one side's deletions
+- 2026-10-15T09:48:00Z agent:claude decided: driver registration is printed, not run
+- 2026-10-15T09:48:00Z agent:claude next: run cargo test -p tk -- --ignored
+```
+
+- **The format is `- <ts> <actor> <kind>: <text>`;** a note keeps the old `- <ts> <actor>: <text>`. An actor `Name` can't contain `:`, so the actor token ending in `:` marks a note and the two can't be confused. The kind is never read from the text, so a note like `open: ...` stays a note.
+- **Existing logs and the merge driver are unchanged.** The driver only reads the timestamp and dedupes by exact line, so tagged lines merge like notes.
+- **Rendering and parsing live together in `tk-store/log.rs`,** so one round-trip test covers the one place that defines the format. A line tk can't parse is kept as raw text, because people write under `## Log` too.
+
+```rust
+// tk-core
+/// Every kind a log line can carry.
+pub enum EntryKind { Note, RuledOut, Decided, Next }
+/// What `tk log` may write. No `Next`: only a handoff writes next steps.
+pub enum LogKind { Note, RuledOut, Decided }
+/// nutype over Vec<NonEmpty>: a handoff must say what's next. If nothing is, use `tk done`.
+pub struct NextSteps(Vec<NonEmpty>);
+pub struct Handoff { pub next: NextSteps, pub ruled_out: Vec<NonEmpty>, pub decided: Vec<NonEmpty> }
+/// What happens to the ticket after the handoff.
+pub enum AfterHandoff { Keep, Release, Block { reason: NonEmpty } }
+
+// tk-app
+Command::Log     { id, text, #[serde(default)] kind: LogKind }   // old JSON stays valid
+Command::Handoff { id, if_version, handoff: Handoff, then: AfterHandoff }
+```
+
+`Handoff` runs through the same `change` path as every write. It appends every entry with one `now`, then applies the move in the same closure. If the move is refused, nothing is written, and `keep_lease` renews the lease for `Keep` and releases it for `Release` or `Block`. A handoff on a ticket that isn't `doing` is allowed: notes taken before claiming are legitimate, and `--release` on a `todo` ticket is already refused by the state machine.
+
+**The latest handoff is the newest group of `next` entries.** Only `Handoff` writes `next`, and timestamps are whole seconds from one `now` per command, so a handoff's entries share a timestamp and a later handoff replaces the earlier plan. Two handoffs within the same second read as one, which a session ending is never fast enough to hit. `ruled-out` and `decided` are facts, so they accumulate.
+
+`Brief` is a query in tk-app and is never persisted. It's built by destructuring exhaustively, so a new `EntryKind` fails to compile until the brief decides where it goes:
+
+| Part | Shown |
+| --- | --- |
+| Header | ID, title, status, holder and since |
+| Waiting on | Open dependencies with their state; omitted when empty |
+| Prose | The body without its log (`log::without_log`) |
+| Next | The latest handoff's steps, with its age and how many notes were logged since, so a stale plan shows as stale |
+| Ruled out, Decided | All of them, newest first, capped at 10 with "N older: tk show" |
+| Notes | The last 5, with "N older: tk show" |
+
+`tk brief` with no ID shows the tickets this checkout has in `doing` by the current actor. Each worktree's files only show its own starts, so this is scoped per worktree even when every agent is `agent:claude`. `tk next --claim --brief` claims and prints the brief in one step. MCP gets `brief` and `handoff` tools; `run` takes the new commands.
+
+**Hooking it into an agent.** In Claude Code, a SessionStart hook matching `startup` and `compact` runs `tk brief`, so a fresh session starts from the brief and a compacted one gets it back after the summary. A hook can't make the agent write a handoff, because compaction gives the model no turn. Handoffs come from habit, so `tk guide` teaches the loop: claim, brief, work, handoff.
+
+Left out on purpose: a `file` entry kind. Changed files are in the diff, paths go stale on rename, and a `decided` note can name a file. Add it back, with the brief flagging missing paths, if it turns out to be missed.
+
 ## Where types can't reach
 
-Types prove shapes and states. They can't prove that text round-trips, that the filesystem behaves or that git merges cleanly, so eight tests cover exactly that.
+Types prove shapes and states. They can't prove that text round-trips, that the filesystem behaves or that git merges cleanly, so nine tests cover exactly that.
 
 | Test | Why types can't cover it |
 | --- | --- |
@@ -598,6 +656,7 @@ Types prove shapes and states. They can't prove that text round-trips, that the 
 | Two threads claim one ticket: exactly one gets the lease | Needs the real OS |
 | A cycle and a missing dependency are both reported | Built from runtime data |
 | Two branches change status and append logs; the merge keeps both log lines and valid TOML | Needs real git |
+| A log entry of every kind renders then parses back the same (proptest); an old untagged line parses as a note, and a hand-written line as raw text | Log lines are text |
 
 The proptest generators build values through nutype's constructors, so they only produce valid tickets.
 
@@ -613,6 +672,7 @@ Build in six phases. After phase 3 agents can use tk, and from then on tk tracks
 4. **TUI.** Board, list, detail, filter, the editor flow and live reload. Done when you run a week of work from the TUI alone.
 5. **Multi-agent.** Leases, `tk next --claim` and `tk merge-driver`. Done when two agents in two worktrees never start the same ticket, and merging their branches needs no hand-editing.
 6. **Optional.** `tk mcp` via [rmcp](https://crates.io/crates/rmcp), the official Rust MCP SDK, over the same `Command`; dynamic ID completion once clap\_complete stabilizes it; `tk archive` for old done tickets.
+7. **Handoffs.** Typed log entries and `tk brief` first, since they're useful on their own, then `tk handoff`, then `tk guide` and the hook recipe. Done when a fresh agent session picks up a ticket from `tk brief` alone, without re-exploring what the last session ruled out.
 
 ## CLAUDE.md for the tk repo
 

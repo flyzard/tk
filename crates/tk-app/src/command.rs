@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tk_core::{
-    Body, Kind, Label, Labels, NonEmpty, Priority, ProjectKey, Resolution, TicketId, Title,
+    AfterHandoff, Body, Handoff, Kind, Label, Labels, LogKind, NonEmpty, Priority, ProjectKey,
+    Resolution, TicketId, Title,
 };
 use tk_store::VersionHex;
 
@@ -69,7 +70,22 @@ pub enum Command {
         if_version: Option<VersionHex>,
     },
     /// Appends a line to the ticket's `## Log`. Appends don't conflict, so there is no version check.
-    Log { id: TicketId, text: NonEmpty },
+    Log {
+        id: TicketId,
+        text: NonEmpty,
+        #[serde(default)]
+        kind: LogKind,
+    },
+    /// Ends a session: logs the next steps and what was ruled out and decided,
+    /// then makes the move, all in one write. Nothing is written if the move is refused.
+    Handoff {
+        id: TicketId,
+        #[schemars(with = "Option<String>")]
+        if_version: Option<VersionHex>,
+        handoff: Handoff,
+        #[serde(default)]
+        then: AfterHandoff,
+    },
     DepAdd {
         id: TicketId,
         dep: TicketId,

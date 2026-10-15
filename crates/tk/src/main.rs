@@ -13,13 +13,14 @@ use std::process::ExitCode;
 
 use camino::Utf8PathBuf;
 use clap::{CommandFactory as _, Parser as _};
-use tk_app::{AppError, Command, Ctx, ListFilter, Scope, execute};
+use tk_app::{AppError, Command, Ctx, ListFilter, Outcome, Scope, execute};
 use tk_core::{
-    Actor, Body, Explain as _, Name, NonEmpty, ProjectKey, Resolution, TicketId, Timestamp,
+    Actor, AfterHandoff, Body, Explain as _, Handoff, LogKind, Name, NextSteps, NonEmpty,
+    ProjectKey, Resolution, TicketId, Timestamp,
 };
 use tk_store::{Store, Workspace};
 
-use crate::cli::{Cli, Cmd, DepCmd, Target, WriteCmd};
+use crate::cli::{Cli, Cmd, DepCmd, HandoffArgs, Target, WriteCmd};
 use crate::output::{Out, json_line, print};
 
 fn main() -> ExitCode {
@@ -87,12 +88,36 @@ fn run(cli: Cli, out: &Out) -> Result<ExitCode, AppError> {
         Cmd::Show { id } => out
             .ticket(&tk_app::show(&open(actor)?, &id)?)
             .map(|()| ExitCode::SUCCESS),
+        Cmd::Brief { id } => {
+            let ctx = open(actor)?;
+            match id {
+                Some(id) => out.brief(&tk_app::brief(&ctx, &id)?),
+                None => out.briefs(&tk_app::my_briefs(&ctx)?, &ctx.actor),
+            }
+            .map(|()| ExitCode::SUCCESS)
+        }
         Cmd::Lint { workspace } => out.lint(&tk_app::lint(
             &open(actor)?,
             Scope::from_workspace_flag(workspace),
         )?),
         Cmd::Apply => apply(&mut open(actor)?),
         Cmd::Mcp => mcp::serve(open(actor)?, clock).map(|()| ExitCode::SUCCESS),
+        Cmd::Write(WriteCmd::Next {
+            claim,
+            project,
+            brief: true,
+        }) => {
+            let mut ctx = open(actor)?;
+            let outcome = execute(Command::Next { project, claim }, &mut ctx)?;
+            warn(&mut ctx);
+            match outcome {
+                Outcome::Updated { id, .. } | Outcome::Next { id, .. } => {
+                    out.brief(&tk_app::brief(&ctx, &id)?)
+                }
+                Outcome::Created { .. } | Outcome::NothingReady => out.outcome(&outcome),
+            }
+            .map(|()| ExitCode::SUCCESS)
+        }
         Cmd::Write(write) => {
             let command = command(write)?;
             let mut ctx = open(actor)?;
@@ -127,7 +152,11 @@ fn command(cmd: WriteCmd) -> Result<Command, AppError> {
                     .unwrap_or_default(),
             ),
         },
-        WriteCmd::Next { claim, project } => Command::Next { project, claim },
+        WriteCmd::Next {
+            claim,
+            project,
+            brief: _,
+        } => Command::Next { project, claim },
         WriteCmd::Start(t) => Command::Start {
             id: t.id,
             if_version: t.if_version,
@@ -171,12 +200,23 @@ fn command(cmd: WriteCmd) -> Result<Command, AppError> {
                 changes,
             }
         }
-        WriteCmd::Log { id, text } => {
+        WriteCmd::Log {
+            id,
+            text,
+            ruled_out,
+            decided,
+        } => {
             let text = text_or_stdin(&text)?;
             let text = NonEmpty::try_new(text.trim_end().to_owned())
                 .map_err(|e| AppError::Invalid(format!("log text: {}", e.explain())))?;
-            Command::Log { id, text }
+            let kind = match (ruled_out, decided) {
+                (true, _) => LogKind::RuledOut,
+                (false, true) => LogKind::Decided,
+                (false, false) => LogKind::Note,
+            };
+            Command::Log { id, text, kind }
         }
+        WriteCmd::Handoff(args) => handoff(args)?,
         WriteCmd::Dep(DepCmd::Add(a)) => Command::DepAdd {
             id: a.target.id,
             dep: a.dep,
@@ -186,6 +226,33 @@ fn command(cmd: WriteCmd) -> Result<Command, AppError> {
             id: a.target.id,
             dep: a.dep,
             if_version: a.target.if_version,
+        },
+    })
+}
+
+/// A handoff, with its next steps checked: there must be at least one.
+fn handoff(args: HandoffArgs) -> Result<Command, AppError> {
+    let HandoffArgs {
+        target: Target { id, if_version },
+        next,
+        ruled_out,
+        decided,
+        release,
+        block,
+    } = args;
+    Ok(Command::Handoff {
+        id,
+        if_version,
+        handoff: Handoff {
+            next: NextSteps::try_new(next)
+                .map_err(|e| AppError::Invalid(e.explain().to_owned()))?,
+            ruled_out,
+            decided,
+        },
+        then: match (release, block) {
+            (true, _) => AfterHandoff::Release,
+            (false, Some(reason)) => AfterHandoff::Block { reason },
+            (false, None) => AfterHandoff::Keep,
         },
     })
 }

@@ -100,9 +100,11 @@ Any other move is refused with code `invalid_transition`.
 | `tk new "Title" [--kind] [--priority] [--label] [--dep] [--body <text\|->]` | Creates a ticket |
 | `tk ls [--all] [--status] [--label] [--workspace] [--fields id,state,title]` | Lists tickets, hiding done ones by default |
 | `tk show <id>` | One ticket, with its version and what it is waiting on |
-| `tk next [--claim]` | The top ready ticket; `--claim` also starts it |
+| `tk next [--claim] [--brief]` | The top ready ticket; `--claim` also starts it, `--brief` prints its brief |
 | `tk edit <id> [--title] [--kind] [--priority] [--add-label] [--rm-label]` | Changes fields |
-| `tk log <id> <text\|->` | Appends a line to `## Log` |
+| `tk log <id> <text\|-> [--ruled-out \| --decided]` | Appends a line to `## Log` |
+| `tk brief [<id>]` | What a fresh session needs to pick a ticket up; no ID means your `doing` ticket here |
+| `tk handoff <id> --next ... [--ruled-out] [--decided] [--release \| --block]` | Ends a session: next steps and findings, logged in one write |
 | `tk dep add <id> <dep>` / `tk dep rm <id> <dep>` | Changes dependencies; cycles are refused and named |
 | `tk lint [--workspace]` | Validates every ticket file and the dependency graph; non-zero exit on problems |
 | `tk apply` | Runs JSON commands from stdin, one per line |
@@ -118,19 +120,36 @@ Every command takes `--json`. Set who is acting with `--as agent:<name>` or the 
 Put the output of `tk guide` in your `AGENTS.md` or `CLAUDE.md`. The loop looks like this:
 
 ```sh
-tk next --claim --json        # take the top ready ticket and start it
-tk show <id> --json           # read it; note its "version"
+tk next --claim --brief       # take the top ready ticket, start it, print its brief
 tk log <id> "what you found"  # append to its log as you work
-tk done <id>                  # or: tk block <id> --reason "..."
+tk log <id> --ruled-out "..." # or --decided: facts the next session should know
+tk done <id>                  # or stop early with a handoff:
+tk handoff <id> --next "run the ignored git test" --ruled-out "2-way merge"
 ```
 
 - **No silent overwrites.** Pass `--if-version <version>` from `tk show` to any write. If the ticket changed since, tk refuses with code `conflict` and a hint to re-read.
 - **Batches.** `tk apply` runs one JSON command per line and stops at the first failure. `tk schema` describes exactly what it accepts.
 - **Small output.** `tk ls --fields id,state,title --json` returns only the fields you ask for.
 
+### Handoffs and briefs
+
+An agent's context fills up with old file reads and dead ends, and it gets worse at the task. tk lets each session work one ticket and start fresh: a session ends with `tk handoff`, and the next one starts from `tk brief` instead of the chat history.
+
+A handoff is just typed lines in `## Log`, so they merge like any other log line:
+
+```markdown
+- 2026-10-15T09:48:00Z agent:claude ruled-out: 2-way log merge, loses one side's deletions
+- 2026-10-15T09:48:00Z agent:claude decided: driver registration is printed, not run
+- 2026-10-15T09:48:00Z agent:claude next: run cargo test -p tk -- --ignored
+```
+
+The brief is derived from them and never stored. It shows the ticket's text, the latest handoff's next steps (with their age and how many entries came after, so a stale plan looks stale), everything ruled out and decided, and the last few notes. A later handoff replaces the next steps; ruled-out and decided entries accumulate. `--release` or `--block` hands the ticket back in the same write; by default it stays yours.
+
+In Claude Code, a SessionStart hook can print the brief at the start of every session and again after compaction. The snippet is in `tk guide`.
+
 ### MCP
 
-`tk mcp` is a stdio MCP server exposing `run` (any command `tk schema` describes), `next`, `list`, `show`, `lint` and `guide`. Start it from inside your project with `TK_ACTOR=agent:<name>` in its environment, and register it with your MCP client as a stdio server.
+`tk mcp` is a stdio MCP server exposing `run` (any command `tk schema` describes), `next`, `list`, `show`, `brief`, `handoff`, `lint` and `guide`. Start it from inside your project with `TK_ACTOR=agent:<name>` in its environment, and register it with your MCP client as a stdio server.
 
 ## Running agents in parallel
 
@@ -214,7 +233,7 @@ tk tracks its own work in `.tickets/`.
 
 ## Status
 
-All six phases of the plan are built: core types, storage, CLI, TUI, leases with the merge driver, and MCP. Still open:
+All seven phases of the plan are built: core types, storage, CLI, TUI, leases with the merge driver, MCP, and handoffs between agent sessions. Still open:
 
 - `tk archive` for old done tickets
 - dynamic ID completion in the shell, once clap supports it on stable

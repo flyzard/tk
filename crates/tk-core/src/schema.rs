@@ -6,7 +6,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 
 use crate::fields::Actor;
 use crate::ids::{ProjectKey, TicketId};
-use crate::text::{Body, Label, Name, NonEmpty, Title};
+use crate::text::{Body, Label, Name, NextSteps, NonEmpty, Title};
 
 macro_rules! string_schema {
     ($($ty:ident => $schema:tt),* $(,)?) => {$(
@@ -30,4 +30,5 @@ string_schema! {
     Actor => { "type": "string", "pattern": "^(human|agent):[a-z0-9._-]{1,32}$", "examples": ["agent:claude"] },
     NonEmpty => { "type": "string", "minLength": 1, "pattern": "^[^\\n\\r]*$" },
     Body => { "type": "string", "description": "Markdown" },
+    NextSteps => { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1, "pattern": "^[^\\n\\r]*$" } },
 }

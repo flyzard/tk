@@ -7,7 +7,7 @@ use tk_core::{
     GraphProblem, Kind, Label, Labels, Priority, StateName, Status, Ticket, TicketId, TicketView,
     Timestamp, Title, ValidGraph,
 };
-use tk_store::{InvalidFile, Loaded, Snapshot, Store, Version};
+use tk_store::{InvalidFile, Loaded, Snapshot, Store, Tx, Version};
 
 use crate::ctx::Ctx;
 use crate::error::AppError;
@@ -51,10 +51,8 @@ impl TicketJson {
             priority,
             labels: labels.clone(),
             depends_on: depends_on.iter().cloned().collect(),
-            waiting_on: depends_on
-                .iter()
-                .filter(|d| states.get(*d) != Some(&StateName::Done))
-                .cloned()
+            waiting_on: waiting(depends_on, states)
+                .map(|(d, _)| d.clone())
                 .collect(),
             created,
             status: status.clone(),
@@ -144,19 +142,34 @@ pub fn show(ctx: &Ctx, id: &TicketId) -> Result<TicketJson, AppError> {
     ctx.store(id.project())?
         .transaction(|tx| -> Result<TicketJson, AppError> {
             let loaded = tx.load(id)?;
-            // A dependency that can't be read counts as not done.
-            let states = loaded
-                .ticket()
-                .depends_on()
-                .iter()
-                .filter_map(|d| {
-                    tx.load(d)
-                        .ok()
-                        .map(|l| (d.clone(), l.ticket().status().name()))
-                })
-                .collect();
-            Ok(TicketJson::new(&loaded, &states))
+            Ok(TicketJson::new(&loaded, &dep_states(tx, &loaded)))
         })
+}
+
+/// The state of each of the ticket's dependencies whose file can be read.
+pub(crate) fn dep_states(tx: &Tx<'_>, loaded: &Loaded) -> BTreeMap<TicketId, StateName> {
+    loaded
+        .ticket()
+        .depends_on()
+        .iter()
+        .filter_map(|d| {
+            tx.load(d)
+                .ok()
+                .map(|l| (d.clone(), l.ticket().status().name()))
+        })
+        .collect()
+}
+
+/// Dependencies that aren't done, with their state. One whose state is
+/// unknown, because its file can't be read, counts as not done.
+pub(crate) fn waiting<'a>(
+    depends_on: &'a BTreeSet<TicketId>,
+    states: &'a BTreeMap<TicketId, StateName>,
+) -> impl Iterator<Item = (&'a TicketId, Option<StateName>)> {
+    depends_on
+        .iter()
+        .map(|d| (d, states.get(d).copied()))
+        .filter(|(_, state)| *state != Some(StateName::Done))
 }
 
 /// Every file that doesn't parse and every dependency problem.
@@ -233,18 +246,18 @@ fn check(report: &mut LintReport, snapshot: Snapshot) -> ValidGraph {
     graph
 }
 
-fn stores(ctx: &Ctx, scope: Scope) -> Result<Vec<&Store>, AppError> {
+pub(crate) fn stores(ctx: &Ctx, scope: Scope) -> Result<Vec<&Store>, AppError> {
     match scope {
         Scope::All => Ok(ctx.stores.values().collect()),
         Scope::Current => Ok(vec![ctx.store(&ctx.project(None)?)?]),
     }
 }
 
-fn snapshot(store: &Store) -> Result<Snapshot, AppError> {
+pub(crate) fn snapshot(store: &Store) -> Result<Snapshot, AppError> {
     store.transaction(|tx| -> Result<Snapshot, AppError> { Ok(tx.snapshot()?) })
 }
 
-fn states(snapshot: &Snapshot) -> BTreeMap<TicketId, StateName> {
+pub(crate) fn states(snapshot: &Snapshot) -> BTreeMap<TicketId, StateName> {
     snapshot
         .tickets()
         .map(|t| (t.id().clone(), t.status().name()))

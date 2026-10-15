@@ -1,11 +1,12 @@
 //! The store's tests: text, bytes and real files, where types can't reach.
 
 use super::*;
+use crate::{LogEntry, LogLine, append_entries, log_lines};
 use proptest::prelude::*;
 use serde_json::json;
 use tk_core::{
-    Actor, Body, Frontmatter, Kind, Label, Labels, Move, Name, NonEmpty, Priority, Resolution,
-    Status, Suffix, Timestamp, Title,
+    Actor, Body, EntryKind, Frontmatter, Kind, Label, Labels, Move, Name, NonEmpty, Priority,
+    Resolution, Status, Suffix, Timestamp, Title,
 };
 
 fn key() -> ProjectKey {
@@ -132,7 +133,34 @@ fn any_ticket(ticket_id: TicketId) -> impl Strategy<Value = Ticket> {
         )
 }
 
+fn log_entry() -> impl Strategy<Value = LogEntry> {
+    let kind = prop_oneof![
+        Just(EntryKind::Note),
+        Just(EntryKind::RuledOut),
+        Just(EntryKind::Decided),
+        Just(EntryKind::Next)
+    ];
+    (timestamp(), actor(), kind, non_empty()).prop_map(|(at, by, kind, text)| LogEntry {
+        at,
+        by,
+        kind,
+        text,
+    })
+}
+
 proptest! {
+    /// Log lines are text: entries of every kind, appended to a body, parse back the same.
+    #[test]
+    fn log_entries_round_trip(entries in prop::collection::vec(log_entry(), 1..6)) {
+        // Appended one at a time and then all at once, the log reads back the same.
+        let body = entries.iter().fold(String::from("## Context\nx\n"), |body, e| {
+            append_entries(&body, std::slice::from_ref(e))
+        });
+        prop_assert_eq!(&body, &append_entries("## Context\nx\n", &entries));
+        let parsed: Vec<LogLine<'_>> = entries.into_iter().map(LogLine::Entry).collect();
+        prop_assert_eq!(log_lines(&body), parsed);
+    }
+
     /// TOML and Markdown are text: render then parse gives back the same ticket.
     #[test]
     fn render_then_parse_is_identity(t in id().prop_flat_map(any_ticket)) {
@@ -251,4 +279,24 @@ fn crlf_files_parse() {
     let (crlf, _) = format::parse(id, &HAND_WRITTEN.replace('\n', "\r\n")).unwrap();
     assert_eq!(crlf.title, lf.title);
     assert_eq!(crlf.status(), lf.status());
+}
+
+/// Lines written before kinds existed are notes; lines in any other shape stay as written.
+#[test]
+fn old_and_hand_written_log_lines_parse() {
+    let body = "## Log\n- 2026-10-15T09:20:45Z agent:claude: open: run the test\n- looked at it again\n- 2026-10-15T09:21:00Z agent:claude maybe: not a kind\n";
+    let note = LogEntry {
+        at: "2026-10-15T09:20:45Z".parse().unwrap(),
+        by: "agent:claude".parse().unwrap(),
+        kind: EntryKind::Note,
+        text: NonEmpty::try_new(String::from("open: run the test")).unwrap(),
+    };
+    assert_eq!(
+        log_lines(body),
+        [
+            LogLine::Entry(note),
+            LogLine::Raw("looked at it again"),
+            LogLine::Raw("2026-10-15T09:21:00Z agent:claude maybe: not a kind"),
+        ]
+    );
 }

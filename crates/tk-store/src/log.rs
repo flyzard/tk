@@ -1,11 +1,99 @@
-//! Appending to the `## Log` section of a ticket body. The rest of the body is never touched.
+//! The `## Log` section of a ticket body: its line format, and appending to it.
+//! The rest of the body is never touched.
+
+use std::fmt;
 
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+use tk_core::{Actor, EntryKind, NonEmpty, Timestamp};
+
+/// One `## Log` line: `- <at> <by>: <text>` for a note, `- <at> <by> <kind>: <text>`
+/// otherwise. An actor's name can't contain `:`, so the two shapes can't be confused,
+/// and the kind is never read from the text.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LogEntry {
+    pub at: Timestamp,
+    pub by: Actor,
+    pub kind: EntryKind,
+    pub text: NonEmpty,
+}
+
+impl LogEntry {
+    /// The inverse of `Display`, or `None` for a line in any other shape.
+    #[must_use]
+    pub fn parse(line: &str) -> Option<Self> {
+        let (at, rest) = line_stamp(line)?;
+        let (head, rest) = rest.split_once(' ')?;
+        let (by, kind, text) = if let Some(by) = head.strip_suffix(':') {
+            (by, EntryKind::Note, rest)
+        } else {
+            let (kind, text) = rest.split_once(' ')?;
+            (head, kind.strip_suffix(':')?.parse().ok()?, text)
+        };
+        Some(Self {
+            at,
+            by: by.parse().ok()?,
+            kind,
+            text: NonEmpty::try_new(text.to_owned()).ok()?,
+        })
+    }
+}
+
+impl fmt::Display for LogEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { at, by, kind, text } = self;
+        match kind {
+            EntryKind::Note => write!(f, "- {at} {by}: {text}"),
+            EntryKind::RuledOut | EntryKind::Decided | EntryKind::Next => {
+                write!(f, "- {at} {by} {kind}: {text}")
+            }
+        }
+    }
+}
+
+/// The timestamp that starts a `- <at> ...` line, and the rest of the line.
+/// Lines tk can't otherwise read still have one, which is what merging sorts by.
+pub(crate) fn line_stamp(line: &str) -> Option<(Timestamp, &str)> {
+    let (at, rest) = line.strip_prefix("- ")?.split_once(' ')?;
+    Some((at.parse().ok()?, rest))
+}
+
+/// A log line as tk reads it. People write under `## Log` too, so a line in
+/// another shape is kept, without its bullet, rather than refused.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum LogLine<'a> {
+    Entry(LogEntry),
+    Raw(&'a str),
+}
+
+/// Every non-blank line of the log section, parsed where it can be.
+#[must_use]
+pub fn log_lines(body: &str) -> Vec<LogLine<'_>> {
+    log_entries(body)
+        .into_iter()
+        .map(|line| {
+            LogEntry::parse(line).map_or_else(
+                || LogLine::Raw(line.strip_prefix("- ").unwrap_or(line)),
+                LogLine::Entry,
+            )
+        })
+        .collect()
+}
+
+/// `body` with `entries` added to the end of its log, in one pass. This and
+/// `Display` are the only places a log line is written.
+#[must_use]
+pub fn append_entries(body: &str, entries: &[LogEntry]) -> String {
+    if entries.is_empty() {
+        return body.to_owned();
+    }
+    let lines: Vec<String> = entries.iter().map(ToString::to_string).collect();
+    append_log(body, &lines.join("\n"))
+}
 
 /// Adds `entry` as the last line of the first `## Log` section, creating the
 /// section at the end if there is none. A heading inside a code fence never matches.
 #[must_use]
-pub fn append_log(body: &str, entry: &str) -> String {
+pub(crate) fn append_log(body: &str, entry: &str) -> String {
     let Some((head, tail)) = log_section(body).and_then(|s| body.split_at_checked(s.end)) else {
         let text = body.trim_end();
         let gap = if text.is_empty() { "" } else { "\n\n" };
@@ -83,8 +171,9 @@ pub(crate) fn log_entries(body: &str) -> Vec<&str> {
         .unwrap_or_default()
 }
 
-/// The body without its log section, for comparing everything else.
-pub(crate) fn without_log(body: &str) -> String {
+/// The body without its log section: what people wrote about the ticket.
+#[must_use]
+pub fn without_log(body: &str) -> String {
     match log_section(body).and_then(|s| Some((body.get(..s.start)?, body.get(s.end..)?))) {
         Some((before, after)) => format!("{before}{after}"),
         None => body.to_owned(),

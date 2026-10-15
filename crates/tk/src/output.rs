@@ -4,8 +4,11 @@ use std::io::{self, Write as _};
 use std::process::ExitCode;
 
 use serde::Serialize;
-use tk_app::{AppError, LintReport, Listing, Outcome, TicketJson, render_invalid};
-use tk_core::{Resolution, Status};
+use tk_app::{
+    AppError, Brief, Capped, Item, LastHandoff, LintReport, Listing, Outcome, TicketJson, Waiting,
+    render_invalid,
+};
+use tk_core::{Actor, Resolution, Status};
 use tk_store::{Store, Workspace};
 
 use crate::cli::Field;
@@ -146,6 +149,24 @@ impl Out {
                 lines.push(format!("\n{}", t.body.trim_end()));
             }
             lines.join("\n")
+        })
+    }
+
+    pub fn brief(&self, b: &Brief) -> Result<(), AppError> {
+        self.either(b, || brief_text(b))
+    }
+
+    /// Several briefs: a JSON array, or the texts one after another.
+    pub fn briefs(&self, briefs: &[Brief], actor: &Actor) -> Result<(), AppError> {
+        self.either(&briefs, || {
+            if briefs.is_empty() {
+                return format!("nothing in doing by {actor} here; pass a ticket ID");
+            }
+            briefs
+                .iter()
+                .map(brief_text)
+                .collect::<Vec<_>>()
+                .join("\n\n---\n\n")
         })
     }
 
@@ -301,4 +322,87 @@ pub fn join<T: std::fmt::Display>(items: impl IntoIterator<Item = T>) -> String 
         .map(|i| i.to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn brief_text(b: &Brief) -> String {
+    // No `..`: a new field shows up here until the text decides about it.
+    let Brief {
+        id,
+        title,
+        kind,
+        priority,
+        status: state,
+        version: _,
+        waiting_on,
+        prose,
+        handoff,
+        ruled_out,
+        decided,
+        notes,
+    } = b;
+    let mut out = vec![
+        format!("{id}  {title}"),
+        format!("{}   {kind} {priority}", status(state)),
+    ];
+    if !waiting_on.is_empty() {
+        let waiting = waiting_on.iter().map(|Waiting { id, state }| match state {
+            Some(state) => format!("{id} ({state})"),
+            None => format!("{id} (unreadable)"),
+        });
+        out.push(format!("waiting on  {}", join(waiting)));
+    }
+    if !prose.is_empty() {
+        out.extend([String::new(), prose.clone()]);
+    }
+    if let Some(LastHandoff {
+        at: _,
+        by,
+        age_minutes,
+        next,
+        entries_since,
+    }) = handoff
+    {
+        let since = match entries_since {
+            0 => String::new(),
+            n => format!(", {n} entries since"),
+        };
+        out.push(String::new());
+        out.push(format!(
+            "Next (handoff {} ago by {by}{since})",
+            age(*age_minutes)
+        ));
+        out.extend(next.iter().map(|n| format!("- {n}")));
+    }
+    section(&mut out, "Ruled out", ruled_out);
+    section(&mut out, "Decided", decided);
+    section(&mut out, "Notes", notes);
+    out.join("\n")
+}
+
+fn section(out: &mut Vec<String>, heading: &str, capped: &Capped<Item>) {
+    let Capped { items, older } = capped;
+    if items.is_empty() {
+        return;
+    }
+    out.push(String::new());
+    out.push(match older {
+        0 => heading.to_owned(),
+        n => format!("{heading} ({n} older: tk show)"),
+    });
+    out.extend(
+        items
+            .iter()
+            .map(|Item { at: _, by: _, text }| format!("- {text}")),
+    );
+}
+
+/// Minutes as a rough age, like `2h 5m` or `3d`.
+fn age(minutes: i64) -> String {
+    let m = minutes.max(0);
+    match (m / 1440, m / 60, m % 60) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, 0) => format!("{h}h"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, _, _) => format!("{d}d"),
+    }
 }

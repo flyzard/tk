@@ -2,10 +2,12 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 use tk_core::{
-    Actor, Body, Move, NewTicket, Priority, ProjectKey, Resolution, StateName, Status, Suffix,
-    Ticket, TicketId, Timestamp, Title, ValidGraph,
+    Actor, Body, EntryKind, Move, NewTicket, NonEmpty, Priority, ProjectKey, Resolution, StateName,
+    Status, Suffix, Ticket, TicketId, Timestamp, Title, ValidGraph,
 };
-use tk_store::{Leases, Loaded, Snapshot, Store, StoreError, Tx, Version, VersionHex, append_log};
+use tk_store::{
+    Leases, Loaded, LogEntry, Snapshot, Store, StoreError, Tx, Version, VersionHex, append_entries,
+};
 
 use crate::command::{Command, FieldChange};
 use crate::ctx::Ctx;
@@ -113,13 +115,13 @@ pub fn execute(cmd: Command, ctx: &mut Ctx) -> Result<Outcome, AppError> {
             moved(ctx, &id, if_version, Move::Finish { resolution })
         }
         Command::Reopen { id, if_version } => moved(ctx, &id, if_version, Move::Reopen),
-        Command::Log { id, text } => {
-            let entry = format!("- {now} {}: {text}", ctx.actor);
-            change(ctx, &id, None, |_, mut t| {
-                t.body = Body::new(append_log(t.body.as_ref(), &entry));
-                Ok(t)
-            })
-        }
+        Command::Log { id, text, kind } => logged(ctx, &id, None, vec![(kind.into(), text)], None),
+        Command::Handoff {
+            id,
+            if_version,
+            handoff,
+            then,
+        } => logged(ctx, &id, if_version, handoff.entries(), then.into_move()),
         Command::DepAdd {
             id,
             dep,
@@ -204,6 +206,36 @@ fn keep_lease(
 fn lease_until(now: Timestamp) -> Result<Timestamp, AppError> {
     now.checked_add(LEASE_TTL)
         .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Appends `entries` to the log, then makes the move if there is one, in one
+/// write. Every entry gets the same `now`: that is what marks a handoff's
+/// entries as one group.
+fn logged(
+    ctx: &mut Ctx,
+    id: &TicketId,
+    if_version: Option<VersionHex>,
+    entries: Vec<(EntryKind, NonEmpty)>,
+    m: Option<Move>,
+) -> Result<Outcome, AppError> {
+    let now = ctx.now;
+    let entries: Vec<LogEntry> = entries
+        .into_iter()
+        .map(|(kind, text)| LogEntry {
+            at: now,
+            by: ctx.actor.clone(),
+            kind,
+            text,
+        })
+        .collect();
+    change(ctx, id, if_version, |_, mut t| {
+        let body = append_entries(t.body.as_ref(), &entries);
+        t.body = Body::new(body);
+        match m {
+            Some(m) => Ok(t.transition(m, now)?),
+            None => Ok(t),
+        }
+    })
 }
 
 fn moved(

@@ -9,7 +9,8 @@ use rmcp::transport::stdio;
 use rmcp::{ErrorData, ServerHandler, ServiceExt as _, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use tk_app::{AppError, Command, Ctx, ListFilter, Scope, execute};
-use tk_core::{Label, ProjectKey, StateName, TicketId, Timestamp};
+use tk_core::{AfterHandoff, Handoff, Label, ProjectKey, StateName, TicketId, Timestamp};
+use tk_store::VersionHex;
 
 #[derive(Clone)]
 pub struct TkServer {
@@ -54,6 +55,26 @@ pub struct ShowArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BriefArgs {
+    /// Omit for the tickets you have in doing in this checkout.
+    #[serde(default)]
+    id: Option<TicketId>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct HandoffArgs {
+    id: TicketId,
+    /// From `show` or `brief`: refuse if someone changed the ticket since.
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    if_version: Option<VersionHex>,
+    handoff: Handoff,
+    /// Defaults to keep: you carry on in a fresh session.
+    #[serde(default)]
+    then: AfterHandoff,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LintArgs {
     #[serde(default)]
     workspace: bool,
@@ -62,7 +83,7 @@ pub struct LintArgs {
 #[tool_router]
 impl TkServer {
     #[tool(
-        description = "Run one tk command: new, edit, start, block, unblock, release, finish, reopen, log, dep_add, dep_remove or next. Pass if_version from `show` to refuse the write if someone changed the ticket since."
+        description = "Run one tk command: new, edit, start, block, unblock, release, finish, reopen, log, handoff, dep_add, dep_remove or next. Pass if_version from `show` to refuse the write if someone changed the ticket since."
     )]
     async fn run(
         &self,
@@ -115,6 +136,48 @@ impl TkServer {
         Ok(reply(tk_app::show(&ctx, &id)))
     }
 
+    #[tool(
+        description = "End a session: log the next steps (required), what was ruled out and what was decided, then keep, release or block the ticket, in one write. The next session's `brief` starts from this."
+    )]
+    async fn handoff(
+        &self,
+        Parameters(args): Parameters<HandoffArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let HandoffArgs {
+            id,
+            if_version,
+            handoff,
+            then,
+        } = args;
+        let mut ctx = self.ctx()?;
+        Ok(reply(run(
+            Command::Handoff {
+                id,
+                if_version,
+                handoff,
+                then,
+            },
+            &mut ctx,
+        )))
+    }
+
+    #[tool(
+        description = "What a fresh session needs to pick a ticket up: the latest handoff's next steps, what was ruled out and decided, and the latest notes. Without id, the tickets you have in doing here."
+    )]
+    async fn brief(
+        &self,
+        Parameters(BriefArgs { id }): Parameters<BriefArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = self.ctx()?;
+        let briefs = match id {
+            Some(id) => tk_app::brief(&ctx, &id).map(|b| vec![b]),
+            None => tk_app::my_briefs(&ctx),
+        };
+        Ok(reply(
+            briefs.map(|briefs| serde_json::json!({ "briefs": briefs })),
+        ))
+    }
+
     #[tool(description = "Every ticket file that doesn't parse and every dependency problem.")]
     async fn lint(
         &self,
@@ -141,7 +204,7 @@ impl TkServer {
 )]
 #[tool_handler(
     name = "tk",
-    instructions = "Tickets as Markdown files in git. Call `guide` once for the rules. Usual loop: `next` with claim, `show`, `run` with op log as you work, then `run` with op finish."
+    instructions = "Tickets as Markdown files in git. Call `guide` once for the rules. Usual loop: `next` with claim, `brief`, `run` with op log as you work, then `run` with op finish, or `handoff` if you stop before it is done."
 )]
 impl ServerHandler for TkServer {}
 

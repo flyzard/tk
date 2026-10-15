@@ -4,6 +4,7 @@
 use alloc::collections::BTreeSet;
 // nutype's generated code calls `to_string`, which no_std has no prelude for.
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use nutype::nutype;
 
 /// A ticket title: trimmed, 1-120 characters, one line.
@@ -41,6 +42,13 @@ pub struct Name(String);
     derive(Debug, Clone, PartialEq, Eq, AsRef, Display, Serialize, Deserialize),
 )]
 pub struct NonEmpty(String);
+
+/// What a handoff says comes next: at least one step. If nothing does, the ticket is done.
+#[nutype(
+    validate(predicate = |steps: &Vec<NonEmpty>| !steps.is_empty()),
+    derive(Debug, Clone, PartialEq, Eq, AsRef, Serialize, Deserialize),
+)]
+pub struct NextSteps(Vec<NonEmpty>);
 
 /// The Markdown body. Any text is valid; it belongs to whoever writes the ticket.
 #[nutype(
@@ -104,6 +112,16 @@ impl Explain for NonEmptyError {
         match self {
             Self::NotEmptyViolated => "this can't be blank",
             Self::PredicateViolated => "this must be one line",
+        }
+    }
+}
+
+impl Explain for NextStepsError {
+    fn explain(&self) -> &'static str {
+        match self {
+            Self::PredicateViolated => {
+                "a handoff needs at least one next step; if nothing is next, finish the ticket"
+            }
         }
     }
 }
