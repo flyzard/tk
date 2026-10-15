@@ -1,0 +1,6 @@
+# Pinned to an exact release: clippy's lint set changes with every release, and
+# "clippy passes" is the bar for done. Bump on purpose, then fix what it reports.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt", "rust-analyzer"]
+targets = ["thumbv7em-none-eabihf"]   # bare metal: proves tk-core builds without std

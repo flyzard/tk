@@ -1,0 +1,15 @@
+# Tests sit at text, filesystem and git boundaries; there a failed unwrap is the assertion.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+# Feature unification turns on std for jiff and getrandom across the workspace,
+# so no_std alone doesn't keep the clock out of tk-core. The binary reads the
+# clock and entropy once each, under #[expect(clippy::disallowed_methods, reason = "...")].
+disallowed-methods = [
+    { path = "jiff::Timestamp::now", reason = "take a Timestamp as an argument", allow-invalid = true },
+    { path = "jiff::Zoned::now", reason = "take a Timestamp as an argument", allow-invalid = true },
+    { path = "std::time::SystemTime::now", reason = "take a Timestamp as an argument", allow-invalid = true },
+    { path = "getrandom::fill", reason = "take random bytes as an argument", allow-invalid = true },
+]

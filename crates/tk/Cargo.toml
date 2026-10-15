@@ -1,0 +1,36 @@
+[package]
+name = "tk"
+description = "Type-driven ticket tracker: a TUI for you, a CLI for agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[dependencies]
+crossterm = { workspace = true }
+frizbee = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
+ratatui = { workspace = true }
+tempfile = { workspace = true }
+tui-input = { workspace = true }
+tui-markdown = { workspace = true }
+rmcp = { workspace = true }
+tokio = { workspace = true }
+tk-core = { workspace = true }
+tk-store = { workspace = true }
+tk-app = { workspace = true }
+clap = { workspace = true }
+camino = { workspace = true }
+clap_complete = { workspace = true }
+strum = { workspace = true, features = ["std"] }
+getrandom = { workspace = true, features = ["std"] }
+jiff = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true }

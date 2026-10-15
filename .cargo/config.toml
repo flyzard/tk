@@ -1,0 +1,4 @@
+# The bar for done: both pass with no warnings.
+[alias]
+lint = "clippy --workspace --all-targets -- -D warnings"
+lint-core = "clippy -p tk-core --target thumbv7em-none-eabihf -- -D warnings"

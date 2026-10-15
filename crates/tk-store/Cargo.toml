@@ -1,0 +1,28 @@
+[package]
+name = "tk-store"
+description = "tk: file format, transactions, versions, atomic writes, leases, merge driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tk-core = { workspace = true }
+blake3 = { workspace = true }
+camino = { workspace = true }
+etcetera = { workspace = true }
+fs-err = { workspace = true }
+jiff = { workspace = true, features = ["std"] }
+pulldown-cmark = { workspace = true }
+serde = { workspace = true, features = ["std", "derive"] }
+tempfile = { workspace = true }
+thiserror = { workspace = true, features = ["std"] }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,21 @@
+[package]
+name = "tk-app"
+description = "tk: Command, execute, Outcome, AppError, JSON views"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tk-core = { workspace = true, features = ["schema"] }
+tk-store = { workspace = true }
+annotate-snippets = { workspace = true }
+camino = { workspace = true }
+jiff = { workspace = true, features = ["std"] }
+schemars = { workspace = true, features = ["std", "derive"] }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true, features = ["std"] }
