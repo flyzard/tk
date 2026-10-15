@@ -24,7 +24,7 @@ Coding agents are good at working through a ticket queue, but most trackers are 
 tk is a single Rust binary. With a Rust toolchain installed ([rustup](https://rustup.rs)):
 
 ```sh
-cargo install --git https://github.com/OWNER/tk tk --locked
+cargo install --git https://github.com/flyzard/tk tk --locked
 ```
 
 Or from a clone:
