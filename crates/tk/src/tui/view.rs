@@ -62,26 +62,48 @@ pub fn render(model: &Model, frame: &mut Frame<'_>) {
     render_overlay(model, frame);
 }
 
+fn view_name(view: View) -> &'static str {
+    match view {
+        View::Board => "Board",
+        View::List => "List",
+        View::Ready => "Ready",
+        View::NeedsFixing => "Needs fixing",
+    }
+}
+
 fn render_header(model: &Model, frame: &mut Frame<'_>, area: Rect) {
-    let fixing = model.data.findings.len();
-    let titles = [
-        String::from("Board"),
-        String::from("List"),
-        String::from("Ready"),
-        if fixing == 0 {
-            String::from("Needs fixing")
-        } else {
-            format!("Needs fixing ({fixing})")
-        },
-    ];
-    let selected = View::ALL.iter().position(|&v| v == model.view);
     let [tabs, info] = Layout::horizontal([Constraint::Min(0), Constraint::Length(48)]).areas(area);
-    frame.render_widget(
-        Tabs::new(titles)
-            .select(selected)
-            .highlight_style(Style::new().bold().reversed()),
-        tabs,
-    );
+    match &model.mode {
+        // The tabs can't be switched from a ticket, so show where it was opened from instead.
+        Mode::Detail { id, scroll: _ } => frame.render_widget(
+            Line::from(vec![
+                Span::raw(format!("{} › ", view_name(model.view))).dim(),
+                Span::raw(id.to_string()).bold(),
+            ]),
+            tabs,
+        ),
+        Mode::Normal
+        | Mode::Filtering(_)
+        | Mode::Prompt(..)
+        | Mode::Confirm { .. }
+        | Mode::Reedit { .. }
+        | Mode::Help => {
+            let fixing = model.data.findings.len();
+            let titles = View::ALL.map(|v| match (v, fixing) {
+                (View::NeedsFixing, 1..) => format!("{} ({fixing})", view_name(v)),
+                (View::Board | View::List | View::Ready | View::NeedsFixing, _) => {
+                    String::from(view_name(v))
+                }
+            });
+            let selected = View::ALL.iter().position(|&v| v == model.view);
+            frame.render_widget(
+                Tabs::new(titles)
+                    .select(selected)
+                    .highlight_style(Style::new().bold().reversed()),
+                tabs,
+            );
+        }
+    }
     let scope = match (model.scope, &model.current) {
         (Scope::Current, Some(key)) => format!("project {key}"),
         (Scope::Current, None) | (Scope::All, _) => String::from("all projects"),
