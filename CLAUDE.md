@@ -21,4 +21,13 @@ The design is in `plan.md`. The compiler is the to-do list.
 - Change tickets only inside `Store::transaction`, through `Loaded::update`.
 - Don't store anything that can be derived.
 - Add a test only at a text, filesystem or git boundary.
-- Track your work in this repo with tk: `tk next --claim`, `tk log`, `tk done`.
+
+## Tickets (tk)
+
+- Your ticket's brief is printed at session start; if not, run `tk brief`, or `tk next --claim --brief` if you have none.
+- Trust its Ruled out and Decided entries. Don't re-investigate them.
+- Log only what the next session would otherwise have to rediscover, with the reason: `tk log <id> --ruled-out "X: why"`, `--decided "Y: why"`, or a plain note.
+- If you had to search for something, ref it so nobody searches again: `tk ref <id> "<path>#<anchor>" --why "what is there"`. Read refs at the lines the brief gives.
+- Done: `cargo lint && cargo lint-core` pass, then `tk done <id>`.
+- Stopping before done (blocked, context getting long, end of a work chunk): `tk handoff <id> --next "<concrete step: file, command>"`.
+- Anything else: `tk guide`.

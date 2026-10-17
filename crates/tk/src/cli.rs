@@ -6,7 +6,8 @@ use clap::{Args, Parser, Subcommand};
 use strum::VariantNames as _;
 use tk_app::FieldChange;
 use tk_core::{
-    Actor, Explain as _, Kind, Label, NonEmpty, Priority, ProjectKey, StateName, TicketId, Title,
+    Actor, Explain as _, Kind, Label, NonEmpty, Priority, ProjectKey, RefTarget, Reference,
+    StateName, TicketId, Title,
 };
 use tk_store::VersionHex;
 
@@ -111,6 +112,9 @@ pub enum WriteCmd {
         /// The Markdown body; `-` reads it from stdin
         #[arg(long)]
         body: Option<String>,
+        /// A place worth reading, as "<target> | <why>"; repeatable. See `tk ref`
+        #[arg(long = "ref", value_name = "REF", value_parser = parsed::<Reference>)]
+        refs: Vec<Reference>,
         /// [default: the project of the current directory]
         #[arg(long, value_parser = project_key)]
         project: Option<ProjectKey>,
@@ -165,6 +169,11 @@ pub enum WriteCmd {
         #[arg(long)]
         decided: bool,
     },
+    /// Point a ticket at a place worth reading, so no session has to search for it again.
+    /// The target is a path from the repository root with an optional #anchor
+    /// (text on the line to start at, or a Markdown heading for its section),
+    /// a ticket ID, or a link. Refused if it isn't there
+    Ref(RefArgs),
     /// End a session: log what's next, what was ruled out and decided, in one write.
     /// The ticket stays yours unless you --release or --block it
     Handoff(HandoffArgs),
@@ -186,12 +195,30 @@ pub struct HandoffArgs {
     /// A choice made; repeatable
     #[arg(long = "decided", value_parser = non_empty)]
     pub decided: Vec<NonEmpty>,
+    /// A place worth reading, as "<target> | <why>"; repeatable. See `tk ref`
+    #[arg(long = "ref", value_name = "REF", value_parser = parsed::<Reference>)]
+    pub refs: Vec<Reference>,
     /// Put it back to todo for anyone
     #[arg(long, conflicts_with = "block")]
     pub release: bool,
     /// Block it, with this reason
     #[arg(long, value_parser = non_empty)]
     pub block: Option<NonEmpty>,
+}
+
+#[derive(Args, Debug)]
+pub struct RefArgs {
+    #[arg(value_parser = parsed::<TicketId>)]
+    pub id: TicketId,
+    /// Like plan.md#Handoffs, src/lib.rs#fn build, app-k3x9 or https://...
+    #[arg(value_parser = parsed::<RefTarget>)]
+    pub target: RefTarget,
+    /// What is there and why it matters to this ticket
+    #[arg(long, value_parser = non_empty)]
+    pub why: NonEmpty,
+    /// Drop this ref instead; --why says why it stopped mattering
+    #[arg(long)]
+    pub drop: bool,
 }
 
 #[derive(Args, Debug)]

@@ -97,19 +97,20 @@ Any other move is refused with code `invalid_transition`.
 | --- | --- |
 | `tk` | Opens the TUI when stdout is a terminal |
 | `tk init --key <key>` | Creates `.tickets/` here and adds the repository to your workspace |
-| `tk new "Title" [--kind] [--priority] [--label] [--dep] [--body <text\|->]` | Creates a ticket |
+| `tk new "Title" [--kind] [--priority] [--label] [--dep] [--ref] [--body <text\|->]` | Creates a ticket |
 | `tk ls [--all] [--status] [--label] [--workspace] [--fields id,state,title]` | Lists tickets, hiding done ones by default |
 | `tk show <id>` | One ticket, with its version and what it is waiting on |
 | `tk next [--claim] [--brief]` | The top ready ticket; `--claim` also starts it, `--brief` prints its brief |
 | `tk edit <id> [--title] [--kind] [--priority] [--add-label] [--rm-label]` | Changes fields |
 | `tk log <id> <text\|-> [--ruled-out \| --decided]` | Appends a line to `## Log` |
 | `tk brief [<id>]` | What a fresh session needs to pick a ticket up; no ID means your `doing` ticket here |
-| `tk handoff <id> --next ... [--ruled-out] [--decided] [--release \| --block]` | Ends a session: next steps and findings, logged in one write |
+| `tk ref <id> <target> --why ... [--drop]` | Points a ticket at a place worth reading: a file, a section, another ticket or a link |
+| `tk handoff <id> --next ... [--ruled-out] [--decided] [--ref] [--release \| --block]` | Ends a session: next steps and findings, logged in one write |
 | `tk dep add <id> <dep>` / `tk dep rm <id> <dep>` | Changes dependencies; cycles are refused and named |
 | `tk lint [--workspace]` | Validates every ticket file and the dependency graph; non-zero exit on problems |
 | `tk apply` | Runs JSON commands from stdin, one per line |
 | `tk schema` | Prints the JSON Schema of those commands |
-| `tk guide` | Prints a short usage guide for `AGENTS.md`, `CLAUDE.md` or a skill |
+| `tk guide` | Prints the full usage guide for agents: the reference they read when the short loop isn't enough |
 | `tk mcp` | Serves the commands over MCP on stdio |
 | `tk completions <shell>` | Prints shell completions |
 
@@ -117,12 +118,27 @@ Every command takes `--json`. Set who is acting with `--as agent:<name>` or the 
 
 ## For agents
 
-Put the output of `tk guide` in your `AGENTS.md` or `CLAUDE.md`. The loop looks like this:
+Keep what agents read every session short. Put this in your `CLAUDE.md` or `AGENTS.md`, replacing the checks line with your project's own, and let agents run `tk guide` when they need the details:
+
+```markdown
+## Tickets (tk)
+
+- Your ticket's brief is printed at session start; if not, run `tk brief`, or `tk next --claim --brief` if you have none.
+- Trust its Ruled out and Decided entries. Don't re-investigate them.
+- Log only what the next session would otherwise have to rediscover, with the reason: `tk log <id> --ruled-out "X: why"`, `--decided "Y: why"`, or a plain note.
+- If you had to search for something, ref it so nobody searches again: `tk ref <id> "<path>#<anchor>" --why "what is there"`. Read refs at the lines the brief gives.
+- Done: your project's checks pass, then `tk done <id>`.
+- Stopping before done (blocked, context getting long, end of a work chunk): `tk handoff <id> --next "<concrete step: file, command>"`.
+- Anything else: `tk guide`.
+```
+
+In practice the loop looks like this:
 
 ```sh
 tk next --claim --brief       # take the top ready ticket, start it, print its brief
 tk log <id> "what you found"  # append to its log as you work
 tk log <id> --ruled-out "..." # or --decided: facts the next session should know
+tk ref <id> "plan.md#Merging" --why "the log merge rules"   # a place worth reading
 tk done <id>                  # or stop early with a handoff:
 tk handoff <id> --next "run the ignored git test" --ruled-out "2-way merge"
 ```
@@ -143,13 +159,39 @@ A handoff is just typed lines in `## Log`, so they merge like any other log line
 - 2026-10-15T09:48:00Z agent:claude next: run cargo test -p tk -- --ignored
 ```
 
-The brief is derived from them and never stored. It shows the ticket's text, the latest handoff's next steps (with their age and how many entries came after, so a stale plan looks stale), everything ruled out and decided, and the last few notes. A later handoff replaces the next steps; ruled-out and decided entries accumulate. `--release` or `--block` hands the ticket back in the same write; by default it stays yours.
+The brief is derived from them and never stored. It shows the ticket's text, the latest handoff's next steps (with their age and how many entries came after, so a stale plan looks stale), where to look, everything ruled out and decided, what each done dependency decided, and the last few notes. A later handoff replaces the next steps; ruled-out and decided entries accumulate. `--release` or `--block` hands the ticket back in the same write; by default it stays yours.
+
+### Refs: where to look
+
+Handoffs keep a ticket's story; refs keep its map. Most of a fresh session goes on orientation: finding the files, the section of the spec, the earlier decision. A ref saves the result of that search as a pointer with a reason, so the next session reads a few lines instead of exploring the repository.
+
+```sh
+tk ref app-k3x9 "docs/spec.md#Credit notes" --why "what counts as a credit note"
+tk ref app-k3x9 "src/export.rs#fn rows" --why "filters by date; the bug is here"
+tk ref app-k3x9 app-a1b2 --why "the query fix this builds on"
+tk ref app-k3x9 src/export --drop --why "too broad: only export.rs matters"
+tk new "Archive old tickets" --ref "plan.md#Open decisions | what counts as old"
+```
+
+A target is a path from the repository root with an optional `#anchor`, a ticket ID, or a link. The anchor is plain text: the brief finds its line again on every read, and for a Markdown heading, its whole section. Nothing derived is stored, so the line numbers are never stale:
+
+```text
+Where to look
+- docs/spec.md:12-19 (8 lines)  what counts as a credit note
+- src/export.rs:88  filters by date; the bug is here
+- app-a1b2 (done: Fix the credit-note query)  the query fix this builds on
+
+Decided in app-a1b2 (done): Fix the credit-note query
+- credit notes are negative lines, not a separate table
+```
+
+A ref to a missing file, anchor or ticket is refused when it's written. `tk lint` flags refs on open tickets that went stale after a rename. A ref to the same target again replaces its why, and `--drop` removes one. Each done dependency's latest decisions are in the brief, because they're the ground this ticket builds on.
 
 In Claude Code, a SessionStart hook can print the brief at the start of every session and again after compaction. The snippet is in `tk guide`.
 
 ### MCP
 
-`tk mcp` is a stdio MCP server exposing `run` (any command `tk schema` describes), `next`, `list`, `show`, `brief`, `handoff`, `lint` and `guide`. Start it from inside your project with `TK_ACTOR=agent:<name>` in its environment, and register it with your MCP client as a stdio server.
+`tk mcp` is a stdio MCP server exposing `run` (any command `tk schema` describes, `ref` included), `next`, `list`, `show`, `brief`, `handoff`, `lint` and `guide`. Start it from inside your project with `TK_ACTOR=agent:<name>` in its environment, and register it with your MCP client as a stdio server.
 
 ## Running agents in parallel
 
@@ -233,7 +275,7 @@ tk tracks its own work in `.tickets/`.
 
 ## Status
 
-All seven phases of the plan are built: core types, storage, CLI, TUI, leases with the merge driver, MCP, and handoffs between agent sessions. Still open:
+All eight phases of the plan are built: core types, storage, CLI, TUI, leases with the merge driver, MCP, handoffs between agent sessions, and refs. Still open:
 
 - `tk archive` for old done tickets
 - dynamic ID completion in the shell, once clap supports it on stable

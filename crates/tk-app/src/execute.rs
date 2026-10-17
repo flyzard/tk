@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 use tk_core::{
-    Actor, Body, EntryKind, Move, NewTicket, NonEmpty, Priority, ProjectKey, Resolution, StateName,
+    Actor, Body, Entry, Move, NewTicket, Priority, ProjectKey, Reference, Resolution, StateName,
     Status, Suffix, Ticket, TicketId, Timestamp, Title, ValidGraph,
 };
 use tk_store::{
@@ -12,6 +12,7 @@ use tk_store::{
 use crate::command::{Command, FieldChange};
 use crate::ctx::Ctx;
 use crate::error::AppError;
+use crate::refs;
 
 /// How many random IDs `new` tries before giving up. A clash is about one in a million per try.
 const ID_ATTEMPTS: usize = 16;
@@ -56,8 +57,10 @@ pub fn execute(cmd: Command, ctx: &mut Ctx) -> Result<Outcome, AppError> {
             labels,
             depends_on,
             body,
+            refs,
         } => {
             let key = ctx.project(project)?;
+            let body = with_refs(ctx, &key, &body, refs)?;
             let spec = || {
                 NewTicket::builder()
                     .title(title.clone())
@@ -115,7 +118,12 @@ pub fn execute(cmd: Command, ctx: &mut Ctx) -> Result<Outcome, AppError> {
             moved(ctx, &id, if_version, Move::Finish { resolution })
         }
         Command::Reopen { id, if_version } => moved(ctx, &id, if_version, Move::Reopen),
-        Command::Log { id, text, kind } => logged(ctx, &id, None, vec![(kind.into(), text)], None),
+        Command::Log { id, text, kind } => logged(ctx, &id, None, vec![kind.entry(text)], None),
+        Command::Ref { id, target, why } => {
+            let entry = Entry::Ref(Reference { target, why });
+            logged(ctx, &id, None, vec![entry], None)
+        }
+        Command::Unref { id, target, why } => unref(ctx, &id, Reference { target, why }),
         Command::Handoff {
             id,
             if_version,
@@ -215,19 +223,11 @@ fn logged(
     ctx: &mut Ctx,
     id: &TicketId,
     if_version: Option<VersionHex>,
-    entries: Vec<(EntryKind, NonEmpty)>,
+    entries: Vec<Entry>,
     m: Option<Move>,
 ) -> Result<Outcome, AppError> {
     let now = ctx.now;
-    let entries: Vec<LogEntry> = entries
-        .into_iter()
-        .map(|(kind, text)| LogEntry {
-            at: now,
-            by: ctx.actor.clone(),
-            kind,
-            text,
-        })
-        .collect();
+    let entries = log_entries(ctx, id.project(), entries)?;
     change(ctx, id, if_version, |_, mut t| {
         let body = append_entries(t.body.as_ref(), &entries);
         t.body = Body::new(body);
@@ -236,6 +236,50 @@ fn logged(
             None => Ok(t),
         }
     })
+}
+
+/// Drops a ref. Checked under the lock, against the log as it is now.
+fn unref(ctx: &mut Ctx, id: &TicketId, reference: Reference) -> Result<Outcome, AppError> {
+    let target = reference.target.clone();
+    let entries = log_entries(ctx, id.project(), vec![Entry::Unref(reference)])?;
+    change(ctx, id, None, |_, mut t| {
+        refs::check_unref(id, t.body.as_ref(), &target)?;
+        t.body = Body::new(append_entries(t.body.as_ref(), &entries));
+        Ok(t)
+    })
+}
+
+/// Stamps entries with the time and actor of this command. A ref whose target
+/// isn't there in `project` is refused, before any lock is taken.
+fn log_entries(
+    ctx: &Ctx,
+    project: &ProjectKey,
+    entries: Vec<Entry>,
+) -> Result<Vec<LogEntry>, AppError> {
+    entries
+        .into_iter()
+        .map(|entry| {
+            if let Entry::Ref(r) = &entry {
+                refs::check(ctx, project, &r.target)?;
+            }
+            Ok(LogEntry {
+                at: ctx.now,
+                by: ctx.actor.clone(),
+                entry,
+            })
+        })
+        .collect()
+}
+
+/// A new ticket's body with its first refs logged.
+fn with_refs(
+    ctx: &Ctx,
+    key: &ProjectKey,
+    body: &Body,
+    refs: Vec<Reference>,
+) -> Result<Body, AppError> {
+    let entries = log_entries(ctx, key, refs.into_iter().map(Entry::Ref).collect())?;
+    Ok(Body::new(append_entries(body.as_ref(), &entries)))
 }
 
 fn moved(

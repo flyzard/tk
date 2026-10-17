@@ -57,8 +57,55 @@ pub struct NextSteps(Vec<NonEmpty>);
 )]
 pub struct Body(String);
 
+/// What separates a ref's target from its why in a log line. No target contains it.
+pub(crate) const REF_SEPARATOR: &str = " | ";
+
+/// A file or directory in the repository, relative to its root, like `crates/tk/src/main.rs`.
+/// `/`-separated and without `..`, so it means the same in every clone. No `#`,
+/// which starts an anchor.
+#[nutype(
+    sanitize(trim),
+    validate(not_empty, predicate = |s: &str| is_repo_path(s)),
+    derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, AsRef, Display, Serialize, Deserialize),
+)]
+pub struct RepoPath(String);
+
+/// Text marking a place in a file, like a heading or `fn build`: one line.
+#[nutype(
+    sanitize(trim),
+    validate(not_empty, predicate = |s: &str| is_ref_part(s)),
+    derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, AsRef, Display, Serialize, Deserialize),
+)]
+pub struct Anchor(String);
+
+/// An `http://` or `https://` link, without spaces.
+#[nutype(
+    sanitize(trim),
+    validate(predicate = |s: &str| is_url(s)),
+    derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, AsRef, Display, Serialize, Deserialize),
+)]
+pub struct Url(String);
+
 fn is_one_line(s: &str) -> bool {
     !s.contains(['\n', '\r'])
+}
+
+fn is_ref_part(s: &str) -> bool {
+    is_one_line(s) && !s.contains(REF_SEPARATOR)
+}
+
+fn is_repo_path(s: &str) -> bool {
+    is_ref_part(s)
+        && !s.contains(['#', '\\'])
+        && !s.starts_with('/')
+        && s.split('/').all(|part| part != "..")
+}
+
+fn is_url(s: &str) -> bool {
+    ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| s.strip_prefix(scheme))
+        .is_some_and(|rest| !rest.is_empty() && !rest.contains(char::is_whitespace))
 }
 
 fn is_kebab(s: &str) -> bool {
@@ -112,6 +159,36 @@ impl Explain for NonEmptyError {
         match self {
             Self::NotEmptyViolated => "this can't be blank",
             Self::PredicateViolated => "this must be one line",
+        }
+    }
+}
+
+impl Explain for RepoPathError {
+    fn explain(&self) -> &'static str {
+        match self {
+            Self::NotEmptyViolated => "a file ref needs a path",
+            Self::PredicateViolated => {
+                "a file ref is a path from the repository root, without '..', '\\' or ' | ', like src/main.rs#fn main"
+            }
+        }
+    }
+}
+
+impl Explain for AnchorError {
+    fn explain(&self) -> &'static str {
+        match self {
+            Self::NotEmptyViolated => "an anchor after '#' can't be blank",
+            Self::PredicateViolated => {
+                "an anchor after '#' is one line without ' | ', like a heading or `fn main`"
+            }
+        }
+    }
+}
+
+impl Explain for UrlError {
+    fn explain(&self) -> &'static str {
+        match self {
+            Self::PredicateViolated => "a link starts with http:// or https:// and has no spaces",
         }
     }
 }

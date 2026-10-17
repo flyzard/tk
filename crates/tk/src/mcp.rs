@@ -83,7 +83,7 @@ pub struct LintArgs {
 #[tool_router]
 impl TkServer {
     #[tool(
-        description = "Run one tk command: new, edit, start, block, unblock, release, finish, reopen, log, handoff, dep_add, dep_remove or next. Pass if_version from `show` to refuse the write if someone changed the ticket since."
+        description = "Run one tk command: new, edit, start, block, unblock, release, finish, reopen, log, ref, unref, handoff, dep_add, dep_remove or next. `ref` points the ticket at a place worth reading (a repo path with an optional #anchor, a ticket ID or a link) and says why: if you had to search for it, ref it. Pass if_version from `show` to refuse the write if someone changed the ticket since."
     )]
     async fn run(
         &self,
@@ -137,7 +137,7 @@ impl TkServer {
     }
 
     #[tool(
-        description = "End a session: log the next steps (required), what was ruled out and what was decided, then keep, release or block the ticket, in one write. The next session's `brief` starts from this."
+        description = "End a session: log the next steps (required), what was ruled out and what was decided, and refs to the places worth reading, then keep, release or block the ticket, in one write. The next session's `brief` starts from this."
     )]
     async fn handoff(
         &self,
@@ -162,7 +162,7 @@ impl TkServer {
     }
 
     #[tool(
-        description = "What a fresh session needs to pick a ticket up: the latest handoff's next steps, what was ruled out and decided, and the latest notes. Without id, the tickets you have in doing here."
+        description = "What a fresh session needs to pick a ticket up: the latest handoff's next steps, where to look (each ref with its current lines), what was ruled out and decided, what done dependencies decided, and the latest notes. Without id, the tickets you have in doing here."
     )]
     async fn brief(
         &self,

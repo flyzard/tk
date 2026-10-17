@@ -2,15 +2,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use camino::Utf8PathBuf;
 use serde::Serialize;
 use tk_core::{
-    GraphProblem, Kind, Label, Labels, Priority, StateName, Status, Ticket, TicketId, TicketView,
-    Timestamp, Title, ValidGraph,
+    GraphProblem, Kind, Label, Labels, Priority, RefTarget, StateName, Status, Ticket, TicketId,
+    TicketView, Timestamp, Title, ValidGraph,
 };
-use tk_store::{InvalidFile, Loaded, Snapshot, Store, Tx, Version};
+use tk_store::{InvalidFile, Loaded, Snapshot, Store, Tx, Version, log_lines};
 
 use crate::ctx::Ctx;
 use crate::error::AppError;
+use crate::refs::{self, Linked, LiveRef, Stale, live_refs, ticket_targets};
 use crate::report::Finding;
 
 /// A ticket as JSON, with its version and the dependencies it is still waiting on.
@@ -51,7 +53,7 @@ impl TicketJson {
             priority,
             labels: labels.clone(),
             depends_on: depends_on.iter().cloned().collect(),
-            waiting_on: waiting(depends_on, states)
+            waiting_on: waiting(depends_on, |d| states.get(d).copied())
                 .map(|(d, _)| d.clone())
                 .collect(),
             created,
@@ -147,7 +149,7 @@ pub fn show(ctx: &Ctx, id: &TicketId) -> Result<TicketJson, AppError> {
 }
 
 /// The state of each of the ticket's dependencies whose file can be read.
-pub(crate) fn dep_states(tx: &Tx<'_>, loaded: &Loaded) -> BTreeMap<TicketId, StateName> {
+fn dep_states(tx: &Tx<'_>, loaded: &Loaded) -> BTreeMap<TicketId, StateName> {
     loaded
         .ticket()
         .depends_on()
@@ -162,27 +164,40 @@ pub(crate) fn dep_states(tx: &Tx<'_>, loaded: &Loaded) -> BTreeMap<TicketId, Sta
 
 /// Dependencies that aren't done, with their state. One whose state is
 /// unknown, because its file can't be read, counts as not done.
-pub(crate) fn waiting<'a>(
-    depends_on: &'a BTreeSet<TicketId>,
-    states: &'a BTreeMap<TicketId, StateName>,
-) -> impl Iterator<Item = (&'a TicketId, Option<StateName>)> {
+pub(crate) fn waiting(
+    depends_on: &BTreeSet<TicketId>,
+    state_of: impl Fn(&TicketId) -> Option<StateName>,
+) -> impl Iterator<Item = (&TicketId, Option<StateName>)> {
     depends_on
         .iter()
-        .map(|d| (d, states.get(d).copied()))
+        .map(move |d| (d, state_of(d)))
         .filter(|(_, state)| *state != Some(StateName::Done))
 }
 
-/// Every file that doesn't parse and every dependency problem.
+/// Every file that doesn't parse, every dependency problem, and every ref on
+/// an open ticket whose target is gone.
 #[derive(Debug, Default)]
 pub struct LintReport {
     pub invalid: Vec<InvalidFile>,
     pub problems: Vec<GraphProblem>,
+    pub stale_refs: Vec<StaleRef>,
+}
+
+/// A ref on an open ticket that points at nothing, usually after a rename.
+/// Refs on done tickets are history and aren't checked.
+#[derive(Debug)]
+pub struct StaleRef {
+    pub id: TicketId,
+    /// The ticket's file.
+    pub path: Utf8PathBuf,
+    pub target: RefTarget,
+    pub problem: Stale,
 }
 
 impl LintReport {
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.invalid.is_empty() && self.problems.is_empty()
+        self.invalid.is_empty() && self.problems.is_empty() && self.stale_refs.is_empty()
     }
 
     /// Everything as findings, the same for `tk lint --json`, MCP and the TUI.
@@ -192,8 +207,44 @@ impl LintReport {
             .iter()
             .map(Finding::from)
             .chain(self.problems.iter().map(Finding::from))
+            .chain(self.stale_refs.iter().map(Finding::from))
             .collect()
     }
+}
+
+/// The refs on open tickets in `snapshot` whose targets can't be found.
+fn stale_refs(ctx: &Ctx, store: &Store, snapshot: &Snapshot) -> Vec<StaleRef> {
+    let mut stale = Vec::new();
+    let open = snapshot
+        .tickets
+        .values()
+        .filter(|l| l.ticket().status().name() != StateName::Done);
+    for loaded in open {
+        let live = live_refs(&log_lines(loaded.ticket().body.as_ref()));
+        if live.is_empty() {
+            continue;
+        }
+        let id = loaded.ticket().id();
+        let linked = refs::linked(ctx, id.project(), ticket_targets(&live), |id| {
+            snapshot.tickets.get(id).map(Linked::of)
+        });
+        for LiveRef {
+            reference,
+            at: _,
+            by: _,
+        } in live
+        {
+            if let Some(problem) = refs::locate(store.repo(), &reference.target, &linked).stale() {
+                stale.push(StaleRef {
+                    id: id.clone(),
+                    path: store.path(id),
+                    target: reference.target,
+                    problem,
+                });
+            }
+        }
+    }
+    stale
 }
 
 /// # Errors
@@ -201,7 +252,9 @@ impl LintReport {
 pub fn lint(ctx: &Ctx, scope: Scope) -> Result<LintReport, AppError> {
     let mut report = LintReport::default();
     for store in stores(ctx, scope)? {
-        check(&mut report, snapshot(store)?);
+        let snapshot = snapshot(store)?;
+        report.stale_refs.extend(stale_refs(ctx, store, &snapshot));
+        check(&mut report, snapshot);
     }
     Ok(report)
 }
@@ -230,6 +283,10 @@ pub fn survey(ctx: &Ctx, scope: Scope) -> Result<Survey, AppError> {
                 .values()
                 .map(|l| TicketJson::new(l, &states)),
         );
+        survey
+            .report
+            .stale_refs
+            .extend(stale_refs(ctx, store, &snapshot));
         let graph = check(&mut survey.report, snapshot);
         survey.ready.extend(graph.ready_ids().cloned());
     }

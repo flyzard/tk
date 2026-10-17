@@ -5,8 +5,8 @@ use crate::{LogEntry, LogLine, append_entries, log_lines};
 use proptest::prelude::*;
 use serde_json::json;
 use tk_core::{
-    Actor, Body, EntryKind, Frontmatter, Kind, Label, Labels, Move, Name, NonEmpty, Priority,
-    Resolution, Status, Suffix, Timestamp, Title,
+    Actor, Body, Entry, Frontmatter, Kind, Label, Labels, Move, Name, NonEmpty, Priority,
+    Reference, Resolution, Status, Suffix, Timestamp, Title,
 };
 
 fn key() -> ProjectKey {
@@ -133,19 +133,32 @@ fn any_ticket(ticket_id: TicketId) -> impl Strategy<Value = Ticket> {
         )
 }
 
-fn log_entry() -> impl Strategy<Value = LogEntry> {
-    let kind = prop_oneof![
-        Just(EntryKind::Note),
-        Just(EntryKind::RuledOut),
-        Just(EntryKind::Decided),
-        Just(EntryKind::Next)
+/// Any ref, from text, so every target shape the parser accepts is covered:
+/// tickets, links, paths, and paths with anchors that contain `#` or `:`.
+fn reference() -> impl Strategy<Value = Reference> {
+    let target = prop_oneof![
+        id().prop_map(|id| id.to_string()),
+        "https://[a-z.]{1,12}/[a-z/#?=]{0,12}",
+        "[a-z0-9_.-]{1,8}(/[a-z0-9 _.-]{1,8}){0,3}(#[^\n\r|]{1,20})?",
     ];
-    (timestamp(), actor(), kind, non_empty()).prop_map(|(at, by, kind, text)| LogEntry {
-        at,
-        by,
-        kind,
-        text,
+    (target, non_empty()).prop_filter_map("a valid ref", |(target, why)| {
+        Some(Reference {
+            target: target.parse().ok()?,
+            why,
+        })
     })
+}
+
+fn log_entry() -> impl Strategy<Value = LogEntry> {
+    let entry = prop_oneof![
+        non_empty().prop_map(Entry::Note),
+        non_empty().prop_map(Entry::RuledOut),
+        non_empty().prop_map(Entry::Decided),
+        non_empty().prop_map(Entry::Next),
+        reference().prop_map(Entry::Ref),
+        reference().prop_map(Entry::Unref),
+    ];
+    (timestamp(), actor(), entry).prop_map(|(at, by, entry)| LogEntry { at, by, entry })
 }
 
 proptest! {
@@ -281,15 +294,15 @@ fn crlf_files_parse() {
     assert_eq!(crlf.status(), lf.status());
 }
 
-/// Lines written before kinds existed are notes; lines in any other shape stay as written.
+/// Lines written before kinds existed are notes; lines in any other shape,
+/// such as a ref without its why, stay as written.
 #[test]
 fn old_and_hand_written_log_lines_parse() {
-    let body = "## Log\n- 2026-10-15T09:20:45Z agent:claude: open: run the test\n- looked at it again\n- 2026-10-15T09:21:00Z agent:claude maybe: not a kind\n";
+    let body = "## Log\n- 2026-10-15T09:20:45Z agent:claude: open: run the test\n- looked at it again\n- 2026-10-15T09:21:00Z agent:claude maybe: not a kind\n- 2026-10-15T09:22:00Z agent:claude ref: plan.md without a why\n";
     let note = LogEntry {
         at: "2026-10-15T09:20:45Z".parse().unwrap(),
         by: "agent:claude".parse().unwrap(),
-        kind: EntryKind::Note,
-        text: NonEmpty::try_new(String::from("open: run the test")).unwrap(),
+        entry: Entry::Note(NonEmpty::try_new(String::from("open: run the test")).unwrap()),
     };
     assert_eq!(
         log_lines(body),
@@ -297,6 +310,7 @@ fn old_and_hand_written_log_lines_parse() {
             LogLine::Entry(note),
             LogLine::Raw("looked at it again"),
             LogLine::Raw("2026-10-15T09:21:00Z agent:claude maybe: not a kind"),
+            LogLine::Raw("2026-10-15T09:22:00Z agent:claude ref: plan.md without a why"),
         ]
     );
 }

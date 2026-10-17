@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use serde::Deserialize;
 
-use crate::fields::EntryKind;
+use crate::entry::{Entry, Reference};
 use crate::status::Move;
 use crate::text::{NextSteps, NonEmpty};
 
@@ -19,22 +19,27 @@ pub struct Handoff {
     /// Choices made, so the next session doesn't reopen them.
     #[serde(default)]
     pub decided: Vec<NonEmpty>,
+    /// Places found worth reading, so the next session goes straight to them.
+    #[serde(default)]
+    pub refs: Vec<Reference>,
 }
 
 impl Handoff {
-    /// Every entry, in the order they are logged: the facts, then the plan.
+    /// Every entry, in the order they are logged: the facts, the refs, then the plan.
     #[must_use]
-    pub fn entries(self) -> Vec<(EntryKind, NonEmpty)> {
+    pub fn entries(self) -> Vec<Entry> {
         let Self {
             next,
             ruled_out,
             decided,
+            refs,
         } = self;
         ruled_out
             .into_iter()
-            .map(|t| (EntryKind::RuledOut, t))
-            .chain(decided.into_iter().map(|t| (EntryKind::Decided, t)))
-            .chain(next.into_inner().into_iter().map(|t| (EntryKind::Next, t)))
+            .map(Entry::RuledOut)
+            .chain(decided.into_iter().map(Entry::Decided))
+            .chain(refs.into_iter().map(Entry::Ref))
+            .chain(next.into_inner().into_iter().map(Entry::Next))
             .collect()
     }
 }

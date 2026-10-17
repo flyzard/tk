@@ -1,23 +1,28 @@
 //! The brief: what a fresh session needs to pick a ticket up, derived from the
 //! ticket and its typed log. Nothing here is stored.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use tk_core::{
-    Actor, EntryKind, Kind, NonEmpty, Priority, StateName, Status, TicketId, TicketView, Timestamp,
+    Actor, Entry, Kind, NonEmpty, Priority, StateName, Status, TicketId, TicketView, Timestamp,
     Title,
 };
 use tk_store::{Loaded, LogEntry, LogLine, Version, log_lines, without_log};
 
 use crate::ctx::Ctx;
 use crate::error::AppError;
-use crate::query::{Scope, dep_states, snapshot, states, stores, waiting};
+use crate::query::{Scope, snapshot, stores, waiting};
+use crate::refs::{self, Found, Linked, LiveRef, live_refs, ticket_targets};
 
 /// How many of the latest notes a brief shows.
 const NOTES_SHOWN: usize = 5;
 /// How many ruled-out and decided entries a brief shows, each.
 const FACTS_SHOWN: usize = 10;
+/// How many refs a brief shows. A ticket with more is probably several tickets.
+const REFS_SHOWN: usize = 10;
+/// How many decided entries a brief shows from each done dependency.
+const UPSTREAM_SHOWN: usize = 3;
 
 #[derive(Serialize, Debug)]
 pub struct Brief {
@@ -33,10 +38,14 @@ pub struct Brief {
     pub prose: String,
     /// The latest handoff, if there was one.
     pub handoff: Option<LastHandoff>,
+    /// Where to look, in the order the targets were first added, each located now.
+    pub refs: Capped<RefItem>,
     /// Newest first.
     pub ruled_out: Capped<Item>,
     /// Newest first.
     pub decided: Capped<Item>,
+    /// What done dependencies decided: the ground this ticket builds on.
+    pub upstream: Vec<Upstream>,
     /// The latest notes, oldest first. Lines tk can't parse count as notes.
     pub notes: Capped<Item>,
 }
@@ -57,6 +66,22 @@ pub struct LastHandoff {
     pub next: Vec<NonEmpty>,
     /// Entries logged after the handoff. More than none means its plan may be stale.
     pub entries_since: usize,
+}
+
+/// A live ref, and where its target is now.
+#[derive(Serialize, Debug)]
+pub struct RefItem {
+    #[serde(flatten)]
+    pub live: LiveRef,
+    pub found: Found,
+}
+
+/// A done dependency's decisions, newest first.
+#[derive(Serialize, Debug)]
+pub struct Upstream {
+    pub id: TicketId,
+    pub title: Title,
+    pub decided: Capped<Item>,
 }
 
 #[derive(Serialize, Debug)]
@@ -82,7 +107,8 @@ pub fn brief(ctx: &Ctx, id: &TicketId) -> Result<Brief, AppError> {
     ctx.store(id.project())?
         .transaction(|tx| -> Result<Brief, AppError> {
             let loaded = tx.load(id)?;
-            Ok(build(&loaded, &dep_states(tx, &loaded), ctx.now))
+            // This project's lock is held: its tickets are read through `tx`.
+            brief_of(ctx, &loaded, |id| tx.load(id).ok().map(|l| Linked::of(&l)))
         })
 }
 
@@ -95,21 +121,25 @@ pub fn my_briefs(ctx: &Ctx) -> Result<Vec<Brief>, AppError> {
     let mut briefs = Vec::new();
     for store in stores(ctx, Scope::Current)? {
         let snapshot = snapshot(store)?;
-        let states = states(&snapshot);
-        briefs.extend(
-            snapshot
-                .tickets
-                .values()
-                .filter(
-                    |l| matches!(l.ticket().status(), Status::Doing { by, .. } if *by == ctx.actor),
-                )
-                .map(|l| build(l, &states, ctx.now)),
-        );
+        for loaded in snapshot
+            .tickets
+            .values()
+            .filter(|l| matches!(l.ticket().status(), Status::Doing { by, .. } if *by == ctx.actor))
+        {
+            briefs.push(brief_of(ctx, loaded, |id| {
+                snapshot.tickets.get(id).map(Linked::of)
+            })?);
+        }
     }
     Ok(briefs)
 }
 
-fn build(loaded: &Loaded, states: &BTreeMap<TicketId, StateName>, now: Timestamp) -> Brief {
+/// One brief. `local` reads tickets of the brief's own project.
+fn brief_of(
+    ctx: &Ctx,
+    loaded: &Loaded,
+    local: impl Fn(&TicketId) -> Option<Linked>,
+) -> Result<Brief, AppError> {
     // No `..`: a new Ticket field breaks this line until the brief decides about it.
     let TicketView {
         id,
@@ -123,22 +153,73 @@ fn build(loaded: &Loaded, states: &BTreeMap<TicketId, StateName>, now: Timestamp
         body,
     } = loaded.ticket().view();
     let lines = log_lines(body.as_ref());
-    let handoff = handoff(&lines, now);
+    let handoff = handoff(&lines, ctx.now);
+    let live = live_refs(&lines);
+    let linked = refs::linked(
+        ctx,
+        id.project(),
+        depends_on.iter().chain(ticket_targets(&live)),
+        local,
+    );
+    let repo = ctx.store(id.project())?.repo();
+    let refs = live
+        .into_iter()
+        .map(|live| RefItem {
+            found: refs::locate(repo, &live.reference.target, &linked),
+            live,
+        })
+        .collect();
+    let Facts {
+        ruled_out,
+        decided,
+        notes,
+    } = facts(lines);
+    Ok(Brief {
+        id: id.clone(),
+        title: title.clone(),
+        kind,
+        priority,
+        status: status.clone(),
+        version: loaded.version(),
+        waiting_on: waiting(depends_on, |d| linked.get(d).map(|l| l.state))
+            .map(|(id, state)| Waiting {
+                id: id.clone(),
+                state,
+            })
+            .collect(),
+        prose: without_log(body.as_ref()).trim().to_owned(),
+        handoff,
+        refs: latest(refs, REFS_SHOWN),
+        ruled_out: newest(ruled_out, FACTS_SHOWN),
+        decided: newest(decided, FACTS_SHOWN),
+        upstream: upstream(depends_on, linked),
+        notes: latest(notes, NOTES_SHOWN),
+    })
+}
+
+/// A log's facts and notes, oldest first. Lines tk can't parse count as notes.
+pub(crate) struct Facts {
+    pub ruled_out: Vec<Item>,
+    pub decided: Vec<Item>,
+    pub notes: Vec<Item>,
+}
+
+pub(crate) fn facts(lines: Vec<LogLine<'_>>) -> Facts {
     let (mut ruled_out, mut decided, mut notes) = (Vec::new(), Vec::new(), Vec::new());
     for line in lines {
         match line {
-            LogLine::Entry(e) => {
-                let bucket = match e.kind {
-                    EntryKind::Note => &mut notes,
-                    EntryKind::RuledOut => &mut ruled_out,
-                    EntryKind::Decided => &mut decided,
-                    // The handoff above has the ones that matter.
-                    EntryKind::Next => continue,
+            LogLine::Entry(LogEntry { at, by, entry }) => {
+                let (bucket, text) = match entry {
+                    Entry::Note(text) => (&mut notes, text),
+                    Entry::RuledOut(text) => (&mut ruled_out, text),
+                    Entry::Decided(text) => (&mut decided, text),
+                    // The brief takes next steps from the handoff, and refs from `live_refs`.
+                    Entry::Next(_) | Entry::Ref(_) | Entry::Unref(_) => continue,
                 };
                 bucket.push(Item {
-                    at: Some(e.at),
-                    by: Some(e.by),
-                    text: e.text.into_inner(),
+                    at: Some(at),
+                    by: Some(by),
+                    text: text.into_inner(),
                 });
             }
             LogLine::Raw(raw) => notes.push(Item {
@@ -148,25 +229,33 @@ fn build(loaded: &Loaded, states: &BTreeMap<TicketId, StateName>, now: Timestamp
             }),
         }
     }
-    Brief {
-        id: id.clone(),
-        title: title.clone(),
-        kind,
-        priority,
-        status: status.clone(),
-        version: loaded.version(),
-        waiting_on: waiting(depends_on, states)
-            .map(|(id, state)| Waiting {
-                id: id.clone(),
-                state,
-            })
-            .collect(),
-        prose: without_log(body.as_ref()).trim().to_owned(),
-        handoff,
-        ruled_out: newest(ruled_out, FACTS_SHOWN),
-        decided: newest(decided, FACTS_SHOWN),
-        notes: latest(notes, NOTES_SHOWN),
+    Facts {
+        ruled_out,
+        decided,
+        notes,
     }
+}
+
+/// What each done dependency decided, in dependency order.
+fn upstream(
+    depends_on: &BTreeSet<TicketId>,
+    mut linked: BTreeMap<TicketId, Linked>,
+) -> Vec<Upstream> {
+    depends_on
+        .iter()
+        .filter_map(|id| {
+            let Linked {
+                title,
+                state: _,
+                decided,
+            } = linked.remove(id)?;
+            (!decided.is_empty()).then(|| Upstream {
+                id: id.clone(),
+                title,
+                decided: newest(decided, UPSTREAM_SHOWN),
+            })
+        })
+        .collect()
 }
 
 fn handoff(lines: &[LogLine<'_>], now: Timestamp) -> Option<LastHandoff> {
@@ -179,19 +268,27 @@ fn handoff(lines: &[LogLine<'_>], now: Timestamp) -> Option<LastHandoff> {
         .collect();
     let at = entries
         .iter()
-        .filter(|e| e.kind == EntryKind::Next)
+        .filter(|e| matches!(e.entry, Entry::Next(_)))
         .map(|e| e.at)
         .max()?;
-    let group: Vec<&LogEntry> = entries
+    let group: Vec<(&LogEntry, &NonEmpty)> = entries
         .iter()
         .copied()
-        .filter(|e| e.kind == EntryKind::Next && e.at == at)
+        .filter(|e| e.at == at)
+        .filter_map(|e| match &e.entry {
+            Entry::Next(text) => Some((e, text)),
+            Entry::Note(_)
+            | Entry::RuledOut(_)
+            | Entry::Decided(_)
+            | Entry::Ref(_)
+            | Entry::Unref(_) => None,
+        })
         .collect();
     Some(LastHandoff {
         at,
-        by: group.first()?.by.clone(),
+        by: group.first()?.0.by.clone(),
         age_minutes: now.duration_since(at).as_mins(),
-        next: group.iter().map(|e| e.text.clone()).collect(),
+        next: group.iter().map(|(_, text)| (*text).clone()).collect(),
         entries_since: entries.iter().filter(|e| e.at > at).count(),
     })
 }

@@ -450,14 +450,15 @@ The newtypes deserialize through nutype's rules, so a bad `tk apply` line is rej
 | --- | --- |
 | `tk` | Opens the TUI when stdout is a terminal |
 | `tk init --key app` | Creates `.tickets/project.toml` and adds the repo to the workspace |
-| `tk new "Title" [--kind] [--priority] [--label] [--dep]` | Creates a ticket; the body comes from stdin when piped |
+| `tk new "Title" [--kind] [--priority] [--label] [--dep] [--ref]` | Creates a ticket; the body comes from stdin when piped |
 | `tk ls [--all] [--status] [--label] [--fields]` | Lists tickets, hiding done ones by default |
 | `tk show <id>` | One ticket with its version and its dependencies' status |
 | `tk next [--claim] [--brief]` | The top ready ticket; `--claim` also starts it, `--brief` prints its brief |
 | `tk start`, `block`, `unblock`, `release`, `done`, `reopen` | Status transitions on one ticket |
 | `tk edit <id> [--title] [--priority] [--add-label]` | Field changes |
 | `tk log <id> [text or -] [--ruled-out \| --decided]` | Appends to `## Log`; `-` reads stdin |
-| `tk handoff <id> --next ... [--ruled-out] [--decided] [--release \| --block]` | Ends a session: typed log entries and an optional move, in one transaction |
+| `tk ref <id> <target> --why ... [--drop]` | Points the ticket at a place worth reading, or drops a ref; refused if the target isn't there |
+| `tk handoff <id> --next ... [--ruled-out] [--decided] [--ref] [--release \| --block]` | Ends a session: typed log entries and an optional move, in one transaction |
 | `tk brief [<id>]` | The compact starting context for a ticket; no ID means your `doing` ticket here |
 | `tk dep add` / `tk dep rm` | Dependency changes, cycle-checked |
 | `tk lint [--all]` | Validates every file; use it as a pre-commit hook |
@@ -606,13 +607,13 @@ An agent's context fills up with old file reads and dead ends, and quality drops
 
 ```rust
 // tk-core
-/// Every kind a log line can carry.
-pub enum EntryKind { Note, RuledOut, Decided, Next }
-/// What `tk log` may write. No `Next`: only a handoff writes next steps.
+/// A log line's kind and text, parsed. A ref's text that isn't `<target> | <why>` leaves the line raw.
+pub enum Entry { Note(NonEmpty), RuledOut(NonEmpty), Decided(NonEmpty), Next(NonEmpty), Ref(Reference), Unref(Reference) }
+/// What `tk log` may write. No `Next`: only a handoff writes next steps. Refs have `tk ref`.
 pub enum LogKind { Note, RuledOut, Decided }
 /// nutype over Vec<NonEmpty>: a handoff must say what's next. If nothing is, use `tk done`.
 pub struct NextSteps(Vec<NonEmpty>);
-pub struct Handoff { pub next: NextSteps, pub ruled_out: Vec<NonEmpty>, pub decided: Vec<NonEmpty> }
+pub struct Handoff { pub next: NextSteps, pub ruled_out: Vec<NonEmpty>, pub decided: Vec<NonEmpty>, pub refs: Vec<Reference> }
 /// What happens to the ticket after the handoff.
 pub enum AfterHandoff { Keep, Release, Block { reason: NonEmpty } }
 
@@ -625,7 +626,7 @@ Command::Handoff { id, if_version, handoff: Handoff, then: AfterHandoff }
 
 **The latest handoff is the newest group of `next` entries.** Only `Handoff` writes `next`, and timestamps are whole seconds from one `now` per command, so a handoff's entries share a timestamp and a later handoff replaces the earlier plan. Two handoffs within the same second read as one, which a session ending is never fast enough to hit. `ruled-out` and `decided` are facts, so they accumulate.
 
-`Brief` is a query in tk-app and is never persisted. It's built by destructuring exhaustively, so a new `EntryKind` fails to compile until the brief decides where it goes:
+`Brief` is a query in tk-app and is never persisted. It's built by matching `Entry` exhaustively, so a new kind fails to compile until the brief decides where it goes:
 
 | Part | Shown |
 | --- | --- |
@@ -633,18 +634,42 @@ Command::Handoff { id, if_version, handoff: Handoff, then: AfterHandoff }
 | Waiting on | Open dependencies with their state; omitted when empty |
 | Prose | The body without its log (`log::without_log`) |
 | Next | The latest handoff's steps, with its age and how many notes were logged since, so a stale plan shows as stale |
+| Where to look | The live refs, each located now (see Refs below), capped at 10 |
 | Ruled out, Decided | All of them, newest first, capped at 10 with "N older: tk show" |
+| Decided in a dependency | For each done dependency, its 3 newest decided entries |
 | Notes | The last 5, with "N older: tk show" |
 
 `tk brief` with no ID shows the tickets this checkout has in `doing` by the current actor. Each worktree's files only show its own starts, so this is scoped per worktree even when every agent is `agent:claude`. `tk next --claim --brief` claims and prints the brief in one step. MCP gets `brief` and `handoff` tools; `run` takes the new commands.
 
 **Hooking it into an agent.** In Claude Code, a SessionStart hook matching `startup` and `compact` runs `tk brief`, so a fresh session starts from the brief and a compacted one gets it back after the summary. A hook can't make the agent write a handoff, because compaction gives the model no turn. Handoffs come from habit, so `tk guide` teaches the loop: claim, brief, work, handoff.
 
-Left out on purpose: a `file` entry kind. Changed files are in the diff, paths go stale on rename, and a `decided` note can name a file. Add it back, with the brief flagging missing paths, if it turns out to be missed.
+## Refs: where to look
+
+Most of a fresh session's cost is orientation: finding the files, the section of this plan and the earlier decision that matter. Orientation is search, and search is what fills the context. Handoffs keep a ticket's story (what was tried, decided, next) but not its map, so every session searched again and threw the result away. **The session that pays for a search leaves the result behind, as a pointer with a reason.** The cheapest moment is planning: a session that reads this plan once can split it into tickets that each point at their two sections, and every session that runs one of them starts from a few lines instead of 700.
+
+An earlier draft left out a `file` entry kind: changed files are in the diff, paths go stale on rename, and a `decided` note can name a file. A ref answers each. The diff shows what changed, not what was worth reading (a spec, a caller, a test). Staleness is handled by storing a stable anchor and deriving the line numbers. A note naming a file can't be checked, located, or dropped.
+
+```markdown
+- 2026-10-17T10:02:00Z agent:claude ref: plan.md#Open decisions | "Done tickets": the original archive rule
+- 2026-10-17T10:09:00Z agent:claude ref: crates/tk-app/src/query.rs#fn dep_states | Ready must see archived deps
+- 2026-10-17T10:15:00Z agent:claude unref: crates/tk-store | too broad: only merge.rs matters
+```
+
+- **A ref is a pointer and a why, never a copy.** A copy goes stale and bloats the brief; a bare pointer is noise. The why lets a session decide whether to open it without opening it, so it's required, like a ruled-out entry's reason.
+- **Targets** (`RefTarget`): a repository path with an optional `#anchor`, a ticket ID, or an `http(s)` link. Text that parses as a ticket ID is one. Paths are `RepoPath` (no `..`, no leading `/`), so they mean the same in every clone and worktree. The anchor is plain text, so it works for any language with no parser: the first line containing it, except that in Markdown a heading containing it wins and gives its whole section, up to the next heading of the same or a higher level.
+- **Store the anchor, derive the lines.** The brief locates every ref on each read, `plan.md:589-643 (55 lines)`, so line numbers are never stale and the session knows the cost before it reads. Nothing derived is stored.
+- **Refs are a set, folded from the log.** A ref to a target already referenced replaces its why in place; an `unref` removes it, with a why too ("too broad" is worth knowing). Facts accumulate; the map is kept current. The log keeps the history and merges like every other line.
+- **Checked when written, flagged when stale.** `ref`, `new --ref` and `handoff --ref` refuse a missing file, anchor or ticket (`bad_ref`), so a typo is caught by the session that made it. An `unref` must name a live ref. `tk lint` reports refs on open tickets whose target is gone; refs on done tickets are history.
+- **Done dependencies' decisions are inline.** `depends_on` already says this ticket builds on another, and what that ticket decided is the contract. The brief shows each done dependency's three newest `decided` entries; its notes and refs stay out. A ref to a ticket shows its state and title only.
+- **Bounded.** The brief shows 10 refs; more than that suggests splitting the ticket.
+
+Writing refs is a habit, like handoffs, so `tk guide` gives the rule: if you had to search for it, ref it; if you read it and it didn't matter, don't.
+
+Left out on purpose: inlining file contents (line ranges let a session pull exactly what it needs), finding refs automatically from prose or diffs (noise), suggesting refs from other tickets with the same labels (a recommendation engine; knowledge every ticket needs belongs in the repo's docs), and a separate out-of-scope kind (`decided: X is out of scope` says it).
 
 ## Where types can't reach
 
-Types prove shapes and states. They can't prove that text round-trips, that the filesystem behaves or that git merges cleanly, so nine tests cover exactly that.
+Types prove shapes and states. They can't prove that text round-trips, that the filesystem behaves or that git merges cleanly, so ten tests cover exactly that.
 
 | Test | Why types can't cover it |
 | --- | --- |
@@ -656,7 +681,8 @@ Types prove shapes and states. They can't prove that text round-trips, that the 
 | Two threads claim one ticket: exactly one gets the lease | Needs the real OS |
 | A cycle and a missing dependency are both reported | Built from runtime data |
 | Two branches change status and append logs; the merge keeps both log lines and valid TOML | Needs real git |
-| A log entry of every kind renders then parses back the same (proptest); an old untagged line parses as a note, and a hand-written line as raw text | Log lines are text |
+| A log entry of every kind, refs to every target shape included, renders then parses back the same (proptest); an old untagged line parses as a note, and a hand-written line or a ref without its why as raw text | Log lines are text |
+| An anchor finds a Markdown heading's section, skipping fenced code and trailing blanks, before prose that mentions it | Markdown is text |
 
 The proptest generators build values through nutype's constructors, so they only produce valid tickets.
 
@@ -664,7 +690,7 @@ Nothing else is tested. The exhaustive `match` and the declared nutype rules are
 
 ## Build phases
 
-Build in six phases. After phase 3 agents can use tk, and from then on tk tracks its own tickets.
+Build in phases. After phase 3 agents can use tk, and from then on tk tracks its own tickets.
 
 1. **Skeleton.** Workspace, four crates, lint config, `rust-toolchain.toml`, `bacon`, and rust-analyzer set to run clippy. Done when `cargo clippy` passes on the empty crates with every lint on and tk-core builds as `no_std`.
 2. **tk-core.** IDs, nutype newtypes, `Status`, `Move`, transitions, `Ticket`, `ValidGraph`, `Ready`. Write every signature with `todo!()` first, then fill them in until the compiler is quiet. Done when no `todo!()` is left and the exhaustive ID test passes.
@@ -673,6 +699,7 @@ Build in six phases. After phase 3 agents can use tk, and from then on tk tracks
 5. **Multi-agent.** Leases, `tk next --claim` and `tk merge-driver`. Done when two agents in two worktrees never start the same ticket, and merging their branches needs no hand-editing.
 6. **Optional.** `tk mcp` via [rmcp](https://crates.io/crates/rmcp), the official Rust MCP SDK, over the same `Command`; dynamic ID completion once clap\_complete stabilizes it; `tk archive` for old done tickets.
 7. **Handoffs.** Typed log entries and `tk brief` first, since they're useful on their own, then `tk handoff`, then `tk guide` and the hook recipe. Done when a fresh agent session picks up a ticket from `tk brief` alone, without re-exploring what the last session ruled out.
+8. **Refs.** `Entry::Ref`/`Unref`, `tk ref`, `--ref` on `new` and `handoff`, Where to look and dependencies' decisions in the brief, stale refs in `tk lint`. Done when a fresh session reaches its first edit by reading the brief's line ranges, without searching the repository.
 
 ## CLAUDE.md for the tk repo
 
@@ -691,7 +718,16 @@ Put these rules in the repo so agents building tk keep the guarantees instead of
 - Change tickets only inside `Store::transaction`, through `Loaded::update`.
 - Don't store anything that can be derived.
 - Add a test only at a text, filesystem or git boundary.
-- Track your work in this repo with tk: `tk next --claim`, `tk log`, `tk done`.
+
+## Tickets (tk)
+
+- Your ticket's brief is printed at session start; if not, run `tk brief`, or `tk next --claim --brief` if you have none.
+- Trust its Ruled out and Decided entries. Don't re-investigate them.
+- Log only what the next session would otherwise have to rediscover, with the reason: `tk log <id> --ruled-out "X: why"`, `--decided "Y: why"`, or a plain note.
+- If you had to search for something, ref it so nobody searches again: `tk ref <id> "<path>#<anchor>" --why "what is there"`. Read refs at the lines the brief gives.
+- Done: `cargo lint && cargo lint-core` pass, then `tk done <id>`.
+- Stopping before done (blocked, context getting long, end of a work chunk): `tk handoff <id> --next "<concrete step: file, command>"`.
+- Anything else: `tk guide`.
 ```
 
 ## Open decisions

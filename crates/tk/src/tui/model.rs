@@ -578,6 +578,7 @@ fn prompt_key(model: &mut Model, key: KeyEvent, prompt: Prompt, mut input: Input
                         labels: tk_core::Labels::new(),
                         depends_on: std::collections::BTreeSet::new(),
                         body: tk_core::Body::default(),
+                        refs: Vec::new(),
                     })]
                 }
                 Err(e) => {

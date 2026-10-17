@@ -5,6 +5,8 @@ use serde::Serialize;
 use tk_core::GraphProblem;
 use tk_store::InvalidFile;
 
+use crate::query::StaleRef;
+
 /// One problem as JSON: where it is and what is wrong.
 #[derive(Serialize, Debug)]
 pub struct Finding {
@@ -36,6 +38,24 @@ impl From<&GraphProblem> for Finding {
             path: None,
             line: None,
             message: p.to_string(),
+        }
+    }
+}
+
+impl From<&StaleRef> for Finding {
+    fn from(r: &StaleRef) -> Self {
+        let StaleRef {
+            id,
+            path,
+            target,
+            problem,
+        } = r;
+        Self {
+            path: Some(path.to_string()),
+            line: None,
+            message: format!(
+                "{id}: ref {target}: {problem}; point it at the new place with `tk ref {id} <target> --why ...`, then drop this one with `tk ref {id} \"{target}\" --drop --why ...`"
+            ),
         }
     }
 }

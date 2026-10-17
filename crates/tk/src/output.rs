@@ -5,10 +5,10 @@ use std::process::ExitCode;
 
 use serde::Serialize;
 use tk_app::{
-    AppError, Brief, Capped, Item, LastHandoff, LintReport, Listing, Outcome, TicketJson, Waiting,
-    render_invalid,
+    AppError, Brief, Capped, Finding, Found, Item, LastHandoff, LintReport, Listing, LiveRef,
+    Outcome, RefItem, TicketJson, Upstream, Waiting, render_invalid,
 };
-use tk_core::{Actor, Resolution, Status};
+use tk_core::{Actor, RefTarget, Reference, Resolution, Status};
 use tk_store::{Store, Workspace};
 
 use crate::cli::Field;
@@ -187,6 +187,9 @@ impl Out {
             for problem in &report.problems {
                 eprintln!("error: {problem}");
             }
+            for stale in &report.stale_refs {
+                eprintln!("error: {}", Finding::from(stale).message);
+            }
         }
         Ok(code)
     }
@@ -336,8 +339,10 @@ fn brief_text(b: &Brief) -> String {
         waiting_on,
         prose,
         handoff,
+        refs,
         ruled_out,
         decided,
+        upstream,
         notes,
     } = b;
     let mut out = vec![
@@ -373,10 +378,63 @@ fn brief_text(b: &Brief) -> String {
         ));
         out.extend(next.iter().map(|n| format!("- {n}")));
     }
+    where_to_look(&mut out, refs);
     section(&mut out, "Ruled out", ruled_out);
     section(&mut out, "Decided", decided);
+    for Upstream { id, title, decided } in upstream {
+        let heading = format!("Decided in {id} (done): {title}");
+        section(&mut out, &heading, decided);
+    }
     section(&mut out, "Notes", notes);
     out.join("\n")
+}
+
+/// Each ref as where to read now, then why: `plan.md:589-643 (55 lines)  the log format`.
+fn where_to_look(out: &mut Vec<String>, refs: &Capped<RefItem>) {
+    let Capped { items, older } = refs;
+    if items.is_empty() {
+        return;
+    }
+    out.push(String::new());
+    out.push(match older {
+        0 => String::from("Where to look"),
+        n => format!(
+            "Where to look ({n} older: tk show; this many may mean the ticket wants splitting)"
+        ),
+    });
+    out.extend(items.iter().map(
+        |RefItem {
+             live:
+                 LiveRef {
+                     reference: Reference { target, why },
+                     at: _,
+                     by: _,
+                 },
+             found,
+         }| format!("- {}  {why}", place(target, found)),
+    ));
+}
+
+fn place(target: &RefTarget, found: &Found) -> String {
+    let path = match target {
+        RefTarget::File { path, anchor: _ } => path.to_string(),
+        RefTarget::Ticket(_) | RefTarget::Url(_) => target.to_string(),
+    };
+    match found {
+        Found::File { lines } => format!("{path} ({lines} lines)"),
+        Found::Section { start, end } => {
+            format!(
+                "{path}:{start}-{end} ({} lines)",
+                end.saturating_sub(*start) + 1
+            )
+        }
+        Found::Line { line } => format!("{path}:{line}"),
+        Found::Dir => format!("{path}/"),
+        Found::Ticket { title, state } => format!("{path} ({state}: {title})"),
+        Found::Link => path,
+        // The anchor is part of what went missing, so this one shows the whole target.
+        Found::Stale { problem } => format!("{target} [stale: {problem}]"),
+    }
 }
 
 fn section(out: &mut Vec<String>, heading: &str, capped: &Capped<Item>) {

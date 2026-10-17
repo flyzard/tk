@@ -117,37 +117,3 @@ pub enum ActorError {
     #[error("an actor's name is 1-32 of a-z, 0-9, '.', '_' and '-'")]
     Name(NameError),
 }
-
-/// What a `## Log` line records. A note is free text; the others are what a
-/// handoff leaves behind, so the next session can start from a brief.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Display, EnumString)]
-#[strum(serialize_all = "kebab-case")]
-pub enum EntryKind {
-    Note,
-    RuledOut,
-    Decided,
-    /// Written only by a handoff, so the newest group of these is the current plan.
-    Next,
-}
-
-/// What `tk log` may write. There is deliberately no `Next`: one stray next
-/// step would replace the last handoff's plan.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum LogKind {
-    #[default]
-    Note,
-    RuledOut,
-    Decided,
-}
-
-impl From<LogKind> for EntryKind {
-    fn from(kind: LogKind) -> Self {
-        match kind {
-            LogKind::Note => Self::Note,
-            LogKind::RuledOut => Self::RuledOut,
-            LogKind::Decided => Self::Decided,
-        }
-    }
-}

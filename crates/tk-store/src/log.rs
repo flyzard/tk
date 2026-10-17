@@ -4,7 +4,7 @@
 use std::fmt;
 
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
-use tk_core::{Actor, EntryKind, NonEmpty, Timestamp};
+use tk_core::{Actor, Entry, EntryKind, Timestamp};
 
 /// One `## Log` line: `- <at> <by>: <text>` for a note, `- <at> <by> <kind>: <text>`
 /// otherwise. An actor's name can't contain `:`, so the two shapes can't be confused,
@@ -13,12 +13,12 @@ use tk_core::{Actor, EntryKind, NonEmpty, Timestamp};
 pub struct LogEntry {
     pub at: Timestamp,
     pub by: Actor,
-    pub kind: EntryKind,
-    pub text: NonEmpty,
+    pub entry: Entry,
 }
 
 impl LogEntry {
-    /// The inverse of `Display`, or `None` for a line in any other shape.
+    /// The inverse of `Display`, or `None` for a line in any other shape,
+    /// including a ref whose text isn't `<target> | <why>`.
     #[must_use]
     pub fn parse(line: &str) -> Option<Self> {
         let (at, rest) = line_stamp(line)?;
@@ -32,20 +32,21 @@ impl LogEntry {
         Some(Self {
             at,
             by: by.parse().ok()?,
-            kind,
-            text: NonEmpty::try_new(text.to_owned()).ok()?,
+            entry: Entry::parse(kind, text)?,
         })
     }
 }
 
 impl fmt::Display for LogEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { at, by, kind, text } = self;
-        match kind {
-            EntryKind::Note => write!(f, "- {at} {by}: {text}"),
-            EntryKind::RuledOut | EntryKind::Decided | EntryKind::Next => {
-                write!(f, "- {at} {by} {kind}: {text}")
-            }
+        let Self { at, by, entry } = self;
+        match entry.kind() {
+            EntryKind::Note => write!(f, "- {at} {by}: {entry}"),
+            kind @ (EntryKind::RuledOut
+            | EntryKind::Decided
+            | EntryKind::Next
+            | EntryKind::Ref
+            | EntryKind::Unref) => write!(f, "- {at} {by} {kind}: {entry}"),
         }
     }
 }
@@ -148,6 +149,24 @@ pub(crate) fn log_section(body: &str) -> Option<LogSection> {
         content: line_end(body, start),
         end: body.len(),
     })
+}
+
+/// Every Markdown heading in `text`: its 0-based line and its level, 1 to 6.
+/// Headings in code blocks don't count, so this agrees with how the log is found.
+#[must_use]
+pub fn markdown_headings(text: &str) -> Vec<(usize, usize)> {
+    Parser::new(text)
+        .into_offset_iter()
+        .filter_map(|(event, range)| {
+            let Event::Start(Tag::Heading { level, .. }) = event else {
+                return None;
+            };
+            let line = text
+                .get(..range.start)
+                .map_or(0, |before| before.matches('\n').count());
+            Some((line, level as usize))
+        })
+        .collect()
 }
 
 /// The offset just past the newline ending the line that contains `at`.

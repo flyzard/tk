@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tk_core::{
     AfterHandoff, Body, Handoff, Kind, Label, Labels, LogKind, NonEmpty, Priority, ProjectKey,
-    Resolution, TicketId, Title,
+    RefTarget, Reference, Resolution, TicketId, Title,
 };
 use tk_store::VersionHex;
 
@@ -29,6 +29,9 @@ pub enum Command {
         depends_on: BTreeSet<TicketId>,
         #[serde(default)]
         body: Body,
+        /// Places worth reading for this ticket, logged as its first refs.
+        #[serde(default)]
+        refs: Vec<Reference>,
     },
     Edit {
         id: TicketId,
@@ -75,6 +78,19 @@ pub enum Command {
         text: NonEmpty,
         #[serde(default)]
         kind: LogKind,
+    },
+    /// Points the ticket at a place worth reading, and says why. A ref to the
+    /// same target again replaces its why. Refused if the target isn't there.
+    Ref {
+        id: TicketId,
+        target: RefTarget,
+        why: NonEmpty,
+    },
+    /// Drops a ref that stopped mattering, and says why.
+    Unref {
+        id: TicketId,
+        target: RefTarget,
+        why: NonEmpty,
     },
     /// Ends a session: logs the next steps and what was ruled out and decided,
     /// then makes the move, all in one write. Nothing is written if the move is refused.

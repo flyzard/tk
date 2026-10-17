@@ -13,13 +13,53 @@ One ticket per session. Start from its brief, not from memory; end with a handof
     tk log <id> "what you found"  # append to its ## Log as you work
     tk log <id> --ruled-out "..." # something that didn't work, so nobody tries it again
     tk log <id> --decided "..."   # a choice made, so nobody reopens it
+    tk ref <id> <path#anchor> --why "..."   # a place worth reading, so nobody searches again
     tk done <id>                  # finished; or hand off before your context fills up:
-    tk handoff <id> --next "..." [--next ...] [--ruled-out ...] [--decided ...] [--release | --block "..."]
+    tk handoff <id> --next "..." [--next ...] [--ruled-out ...] [--decided ...] [--ref ...] [--release | --block "..."]
 
 A brief is the ticket's text, the latest handoff's next steps (with how long ago, and how
-many entries were logged since), everything ruled out and decided, and the latest notes.
+many entries were logged since), where to look, everything ruled out and decided, what
+each done dependency decided, and the latest notes.
 A handoff keeps the ticket yours unless you release or block it; the next handoff replaces
 its next steps. Hand off when you stop for any reason and the ticket isn't done.
+
+## Writing entries the next session can use
+
+Log what the next session would otherwise have to rediscover: dead ends, choices, the
+cause of a bug. Not every step: the brief shows only the latest notes.
+
+    bad:  --next "continue fixing"
+    good: --next "make test_price.py pass: rewrite total() in price.py with Decimal"
+    bad:  --ruled-out "tried floor"
+    good: --ruled-out "math.floor: breaks the .5 cases in test_price.py"
+
+    bad:  tk ref <id> src --why "code"
+    good: tk ref <id> "src/price.rs#fn total" --why "rounds per line; the bug is here"
+
+Every ruled-out entry says why, or someone tries it again "just to check". Every next step
+names a file or a command. Every ref says what is there.
+
+## Refs: where to look
+
+If you had to search for it, ref it. If you read it and it didn't matter, don't. A ref
+points at a place and says why it matters, so the next session reads those lines and
+nothing else.
+
+    tk ref <id> "plan.md#Handoffs" --why "..."           # a Markdown heading: its whole section
+    tk ref <id> "src/price.rs#fn total" --why "..."      # the first line containing the text
+    tk ref <id> src/export --why "..."                   # a file or directory
+    tk ref <id> app-k3x9 --why "..."                     # another ticket
+    tk ref <id> https://... --why "..."                  # a link; tk never fetches it
+    tk ref <id> src/export --drop --why "too broad: only export.rs matters"
+    tk handoff <id> --next "..." --ref "plan.md#Handoffs | the log line format"
+    tk new "Title" --ref "plan.md#Archive | what counts as old"
+
+Paths are from the repository root. The brief shows each ref where it is now, like
+`plan.md:589-643 (55 lines)`: read just those lines. A ref to a missing file, anchor or
+ticket is refused when written, and `tk lint` flags refs on open tickets that went stale
+after a rename. A ref to the same target again replaces its why; refs stay until dropped.
+
+What a done dependency decided is shown in the brief too: it's settled, build on it.
 
 ## Rules
 

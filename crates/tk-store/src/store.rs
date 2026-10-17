@@ -184,7 +184,9 @@ impl Store {
         &self.dir
     }
 
-    fn path(&self, id: &TicketId) -> Utf8PathBuf {
+    /// The file a ticket lives in.
+    #[must_use]
+    pub fn path(&self, id: &TicketId) -> Utf8PathBuf {
         self.dir.join(format!("{id}.md"))
     }
 }

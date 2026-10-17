@@ -22,6 +22,7 @@ macro_rules! serde_via_str {
     )*};
 }
 
+mod entry;
 mod fields;
 mod graph;
 mod handoff;
@@ -32,14 +33,16 @@ mod status;
 mod text;
 mod ticket;
 
-pub use fields::{Actor, ActorError, EntryKind, Kind, LogKind, Priority};
+pub use entry::{Entry, EntryKind, LogKind, RefTarget, RefTargetError, Reference, ReferenceError};
+pub use fields::{Actor, ActorError, Kind, Priority};
 pub use graph::{DepError, GraphProblem, NotReady, Ready, ValidGraph};
 pub use handoff::{AfterHandoff, Handoff};
 pub use ids::{IdError, ProjectKey, ProjectKeyError, Suffix, TicketId};
 pub use status::{InvalidTransition, Move, Resolution, StateName, Status, TransitionName};
 pub use text::{
-    Body, Explain, Label, LabelError, Labels, Name, NameError, NextSteps, NextStepsError, NonEmpty,
-    NonEmptyError, Title, TitleError,
+    Anchor, AnchorError, Body, Explain, Label, LabelError, Labels, Name, NameError, NextSteps,
+    NextStepsError, NonEmpty, NonEmptyError, RepoPath, RepoPathError, Title, TitleError, Url,
+    UrlError,
 };
 pub use ticket::{Frontmatter, NewTicket, Ticket, TicketView};
 

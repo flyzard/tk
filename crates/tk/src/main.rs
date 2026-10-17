@@ -20,7 +20,7 @@ use tk_core::{
 };
 use tk_store::{Store, Workspace};
 
-use crate::cli::{Cli, Cmd, DepCmd, HandoffArgs, Target, WriteCmd};
+use crate::cli::{Cli, Cmd, DepCmd, HandoffArgs, RefArgs, Target, WriteCmd};
 use crate::output::{Out, json_line, print};
 
 fn main() -> ExitCode {
@@ -138,6 +138,7 @@ fn command(cmd: WriteCmd) -> Result<Command, AppError> {
             labels,
             deps,
             body,
+            refs,
             project,
         } => Command::New {
             project,
@@ -151,6 +152,7 @@ fn command(cmd: WriteCmd) -> Result<Command, AppError> {
                     .transpose()?
                     .unwrap_or_default(),
             ),
+            refs,
         },
         WriteCmd::Next {
             claim,
@@ -205,17 +207,8 @@ fn command(cmd: WriteCmd) -> Result<Command, AppError> {
             text,
             ruled_out,
             decided,
-        } => {
-            let text = text_or_stdin(&text)?;
-            let text = NonEmpty::try_new(text.trim_end().to_owned())
-                .map_err(|e| AppError::Invalid(format!("log text: {}", e.explain())))?;
-            let kind = match (ruled_out, decided) {
-                (true, _) => LogKind::RuledOut,
-                (false, true) => LogKind::Decided,
-                (false, false) => LogKind::Note,
-            };
-            Command::Log { id, text, kind }
-        }
+        } => log(id, &text, ruled_out, decided)?,
+        WriteCmd::Ref(args) => reference(args),
         WriteCmd::Handoff(args) => handoff(args)?,
         WriteCmd::Dep(DepCmd::Add(a)) => Command::DepAdd {
             id: a.target.id,
@@ -230,6 +223,34 @@ fn command(cmd: WriteCmd) -> Result<Command, AppError> {
     })
 }
 
+/// A log line, its text read from stdin for `-`.
+fn log(id: TicketId, text: &str, ruled_out: bool, decided: bool) -> Result<Command, AppError> {
+    let text = text_or_stdin(text)?;
+    let text = NonEmpty::try_new(text.trim_end().to_owned())
+        .map_err(|e| AppError::Invalid(format!("log text: {}", e.explain())))?;
+    let kind = match (ruled_out, decided) {
+        (true, _) => LogKind::RuledOut,
+        (false, true) => LogKind::Decided,
+        (false, false) => LogKind::Note,
+    };
+    Ok(Command::Log { id, text, kind })
+}
+
+/// A ref, or with `--drop` an unref.
+fn reference(args: RefArgs) -> Command {
+    let RefArgs {
+        id,
+        target,
+        why,
+        drop,
+    } = args;
+    if drop {
+        Command::Unref { id, target, why }
+    } else {
+        Command::Ref { id, target, why }
+    }
+}
+
 /// A handoff, with its next steps checked: there must be at least one.
 fn handoff(args: HandoffArgs) -> Result<Command, AppError> {
     let HandoffArgs {
@@ -237,6 +258,7 @@ fn handoff(args: HandoffArgs) -> Result<Command, AppError> {
         next,
         ruled_out,
         decided,
+        refs,
         release,
         block,
     } = args;
@@ -248,6 +270,7 @@ fn handoff(args: HandoffArgs) -> Result<Command, AppError> {
                 .map_err(|e| AppError::Invalid(e.explain().to_owned()))?,
             ruled_out,
             decided,
+            refs,
         },
         then: match (release, block) {
             (true, _) => AfterHandoff::Release,

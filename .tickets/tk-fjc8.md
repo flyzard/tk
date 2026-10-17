@@ -5,5 +5,5 @@ priority = "p2"
 labels = []
 depends_on = []
 created = 2026-10-15T09:58:05Z
-status = { state = "todo" }
+status = { state = "done", at = 2026-10-15T20:22:52Z, resolution = "completed" }
 +++

@@ -4,6 +4,8 @@ use serde::Serialize;
 use tk_core::{DepError, InvalidTransition, NotReady, ProjectKey, TicketId};
 use tk_store::{AcquireError, Claimed, Conflict, InvalidFile, StoreError, UpdateError};
 
+use crate::refs::{RefError, Stale};
+
 /// A new variant fails to compile until it has a code, an exit status and a hint.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -23,6 +25,8 @@ pub enum AppError {
     Claimed(Claimed),
     #[error(transparent)]
     InvalidFile(Box<InvalidFile>),
+    #[error(transparent)]
+    Ref(#[from] RefError),
     #[error("no project with key {0} in the workspace")]
     UnknownProject(ProjectKey),
     #[error("not inside a tk project")]
@@ -46,6 +50,7 @@ pub enum ErrorCode {
     NotReady,
     Claimed,
     InvalidFile,
+    BadRef,
     UnknownProject,
     NoProject,
     Config,
@@ -73,6 +78,7 @@ impl AppError {
             Self::NotReady(_) => ErrorCode::NotReady,
             Self::Claimed(_) => ErrorCode::Claimed,
             Self::InvalidFile(_) => ErrorCode::InvalidFile,
+            Self::Ref(_) => ErrorCode::BadRef,
             Self::UnknownProject(_) => ErrorCode::UnknownProject,
             Self::NoProject => ErrorCode::NoProject,
             Self::Config(_) => ErrorCode::Config,
@@ -84,7 +90,11 @@ impl AppError {
     #[must_use]
     pub fn hint(&self) -> Option<String> {
         match self {
-            Self::NotFound(_) => Some(String::from("run `tk ls --all` to see ticket IDs")),
+            Self::NotFound(_)
+            | Self::Ref(RefError::Stale {
+                target: _,
+                problem: Stale::NoTicket,
+            }) => Some(String::from("run `tk ls --all` to see ticket IDs")),
             Self::InvalidTransition(_) => {
                 Some(String::from("`tk guide` lists the allowed status changes"))
             }
@@ -100,6 +110,15 @@ impl AppError {
                 "another agent is on it; run `tk next` to find other work",
             )),
             Self::InvalidFile(_) => Some(String::from("run `tk lint` to see every problem")),
+            Self::Ref(RefError::Stale {
+                target: _,
+                problem: Stale::NoFile | Stale::NoAnchor,
+            }) => Some(String::from(
+                "a path is from the repository root, and an anchor is text on the line to start at, like plan.md#Handoffs",
+            )),
+            Self::Ref(RefError::NotReferenced(id, _)) => Some(format!(
+                "`tk brief {id}` lists its refs under Where to look"
+            )),
             Self::UnknownProject(_) => {
                 Some(String::from("run `tk init --key <key>` in that repository"))
             }
@@ -144,6 +163,7 @@ impl ErrorCode {
             Self::Internal => 13,
             Self::Io => 14,
             Self::Claimed => 15,
+            Self::BadRef => 16,
         }
     }
 }
